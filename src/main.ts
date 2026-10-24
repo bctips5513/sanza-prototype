@@ -427,6 +427,7 @@ async function loadPhoto(file: File) {
   if (meta.direction !== undefined) {
     yaw = meta.direction;
     if (meta.directionRef === 'M') notes.push('撮影方位は磁北基準です（真北との差＝偏角 約7〜9°）。');
+    notes.push('EXIFの撮影方位は数十度ずれることがあります。合わない場合は2点合わせを使ってください。');
   } else notes.push('撮影方位がないため、現在のパノラマ中心の方位を初期値にしました。');
   state.photo = { img, url, name: file.name, meta, cam: { yaw, pitch: 0, roll: 0, focalPx, width: W, height: H } };
   state.alignTaps = [];
@@ -437,7 +438,7 @@ async function loadPhoto(file: File) {
     m.lat !== undefined && m.lon !== undefined
       ? `撮影位置: ${m.lat.toFixed(6)}, ${m.lon.toFixed(6)}${m.gpsAlt !== undefined ? `（GPS高度 ${m.gpsAlt.toFixed(1)} m・計算には不使用）` : ''}`
       : '撮影位置: なし（iPhoneでは写真選択時に「オプション」→「位置情報」をオンにするか、「ファイル」から選ぶと残ります）',
-    `焦点距離: ${m.focal35 ? `35mm換算 ${m.focal35} mm` : '—'}${m.focal ? `（実 ${m.focal} mm）` : ''}・水平画角 ${fmt(hfovDeg({ focalPx, width: W }), 1)}°`,
+    `焦点距離: ${m.focal35 ? `35mm換算 ${m.focal35} mm` : '—'}${m.focal ? `（実 ${m.focal.toFixed(2)} mm）` : ''}・水平画角 ${fmt(hfovDeg({ focalPx, width: W }), 1)}°`,
     `撮影方位: ${m.direction !== undefined ? `${m.direction.toFixed(1)}°（${m.directionRef === 'M' ? '磁北' : '真北'}）` : '—'}`,
     ...notes.map((n) => `※ ${esc(n)}`),
   ];
