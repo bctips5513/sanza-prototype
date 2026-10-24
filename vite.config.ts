@@ -9,6 +9,7 @@ const CSP = [
   "img-src 'self' blob: data: https://cyberjapandata.gsi.go.jp",
   "connect-src 'self' https://cyberjapandata.gsi.go.jp https://cyberjapandata2.gsi.go.jp https://overpass-api.de https://overpass.kumi.systems https://overpass.private.coffee",
   "worker-src 'self' blob:",
+  "media-src 'self' blob: mediastream:",
   "form-action 'none'",
   "base-uri 'self'",
 ].join('; ');
@@ -27,6 +28,9 @@ export default defineConfig({
   base: '/sanza-prototype/',
   plugins: [cspPlugin()],
   worker: { format: 'es' },
+  build: {
+    rollupOptions: { input: { main: 'index.html', sensor: 'sensor.html' } },
+  },
   test: {
     include: ['tests/**/*.test.ts'],
     exclude: ['tests/online/**'],

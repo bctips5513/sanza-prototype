@@ -791,6 +791,7 @@ function renderCamWedge() {
   const o = state.observer;
   if (!ph || !o) return;
   const half = hfovDeg(ph.cam) / 2;
+  if (!Number.isFinite(half) || !Number.isFinite(ph.cam.yaw)) return;
   const L1 = 15_000;
   const pts: [number, number][] = [[o.lat, o.lon]];
   for (let a = -half; a <= half + 1e-9; a += half / 8) {

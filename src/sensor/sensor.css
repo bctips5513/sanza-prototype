@@ -1,0 +1,71 @@
+.cam-wrap {
+  position: relative;
+  width: 100%;
+  height: 55vh;
+  min-height: 260px;
+  background: #000;
+  overflow: hidden;
+}
+.cam-wrap video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.crosshair {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 44px;
+  height: 44px;
+  margin: -22px 0 0 -22px;
+  pointer-events: none;
+}
+.crosshair::before,
+.crosshair::after {
+  content: '';
+  position: absolute;
+  background: #ff2d55;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+}
+.crosshair::before {
+  left: 21px;
+  top: 0;
+  width: 2px;
+  height: 44px;
+}
+.crosshair::after {
+  top: 21px;
+  left: 0;
+  height: 2px;
+  width: 44px;
+}
+.hud {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  color: #fff;
+  font-size: 13px;
+  line-height: 1.5;
+  text-shadow: 0 0 3px #000, 0 0 3px #000;
+  font-variant-numeric: tabular-nums;
+}
+.peak-select {
+  width: 100%;
+  font-size: 15px;
+  margin: 6px 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+}
+.chart {
+  width: 100%;
+  height: 120px;
+  display: block;
+}
+.raw {
+  font-size: 11px;
+  white-space: pre-wrap;
+  margin: 6px 0 0;
+}
