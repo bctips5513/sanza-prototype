@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#1c2733" />
+    <title>山座同定 検証プロトタイプ</title>
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>山座同定 検証</h1>
+      <div id="status" class="status">観測地点を選んでください</div>
+      <div class="progress"><div id="progress-bar"></div></div>
+    </header>
+
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-tab="place" class="active">地点</button>
+      <button role="tab" data-tab="pano">パノラマ</button>
+      <button role="tab" data-tab="photo">写真</button>
+      <button role="tab" data-tab="settings">設定</button>
+    </nav>
+
+    <main>
+      <!-- 地点 -->
+      <section id="tab-place" class="tab active">
+        <div id="map"></div>
+        <div class="panel">
+          <p class="hint">地図をタップ（マーカーはドラッグ可）または緯度経度を入力</p>
+          <div class="row">
+            <label>緯度 <input id="in-lat" type="number" step="0.00001" inputmode="decimal" /></label>
+            <label>経度 <input id="in-lon" type="number" step="0.00001" inputmode="decimal" /></label>
+          </div>
+          <div class="row">
+            <button id="btn-setll">この座標にする</button>
+            <button id="btn-geo">現在地</button>
+          </div>
+          <div class="row">
+            <label>目の高さ [m] <input id="in-eye" type="number" step="0.1" inputmode="decimal" /></label>
+          </div>
+          <dl class="kv">
+            <dt>地表標高（DEM）</dt><dd id="out-ground">—</dd>
+            <dt>観測高（地表＋目の高さ）</dt><dd id="out-obs">—</dd>
+          </dl>
+          <div class="row">
+            <button id="btn-compute" class="primary">稜線を計算</button>
+            <button id="btn-gsiapi">地理院標高APIと比較</button>
+          </div>
+          <p id="out-gsiapi" class="small"></p>
+          <p class="small">
+            ※ 位置情報（現在地）は座標の取得にだけ使います。観測者の標高は GPS ではなく DEM の地表標高＋目の高さです。
+          </p>
+        </div>
+      </section>
+
+      <!-- パノラマ -->
+      <section id="tab-pano" class="tab">
+        <canvas id="pano" class="view"></canvas>
+        <div class="panel">
+          <div class="row wrap">
+            <button data-jump="0">北</button>
+            <button data-jump="90">東</button>
+            <button data-jump="180">南</button>
+            <button data-jump="270">西</button>
+            <label>縦倍率
+              <select id="sel-vscale">
+                <option value="1">×1</option>
+                <option value="2">×2</option>
+                <option value="4">×4</option>
+              </select>
+            </label>
+          </div>
+          <div id="pano-info" class="info small">ドラッグで移動、ピンチ／ホイールで拡大。山頂や稜線をタップすると詳細を表示します。</div>
+          <div class="row wrap">
+            <button id="btn-csv-sky">稜線CSV</button>
+            <button id="btn-csv-peaks">山頂CSV</button>
+          </div>
+          <p id="pano-stats" class="small"></p>
+        </div>
+      </section>
+
+      <!-- 写真 -->
+      <section id="tab-photo" class="tab">
+        <canvas id="photo" class="view"></canvas>
+        <div class="panel">
+          <div class="row wrap">
+            <label class="file">写真を選択<input id="in-photo" type="file" accept="image/jpeg,image/png,image/heic,image/*" /></label>
+            <span class="small">写真は端末内でのみ処理し、外部へ送信しません。</span>
+          </div>
+          <div id="photo-meta" class="info small"></div>
+          <div class="seg" id="seg-mode">
+            <button data-mode="adjust" class="active">稜線を動かす</button>
+            <button data-mode="view">写真を拡大・移動</button>
+            <button data-mode="align">2点合わせ</button>
+          </div>
+          <div id="align-panel" class="info small hidden"></div>
+          <div id="cam-controls"></div>
+          <div class="row wrap">
+            <label>重ね合わせ不透明度 <input id="in-opacity" type="range" min="0" max="1" step="0.05" value="0.85" /></label>
+            <label class="check"><input id="chk-bands" type="checkbox" checked /> 手前の尾根</label>
+            <label class="check"><input id="chk-labels" type="checkbox" checked /> 山名</label>
+            <button id="btn-fit">全体表示</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 設定 -->
+      <section id="tab-settings" class="tab">
+        <div class="panel" id="settings-form"></div>
+      </section>
+    </main>
+
+    <div id="sheet" class="sheet hidden" role="dialog" aria-modal="true">
+      <div class="sheet-body">
+        <div class="sheet-head">
+          <strong id="sheet-title"></strong>
+          <button id="sheet-close" aria-label="閉じる">✕</button>
+        </div>
+        <div id="sheet-content"></div>
+      </div>
+    </div>
+
+    <footer class="attrib">
+      標高・地図: <a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noopener">地理院タイル</a>
+      ／ 山頂: © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a> (ODbL)
+    </footer>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

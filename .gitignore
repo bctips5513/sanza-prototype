@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+# テスト用写真はリポジトリに含めない
+test-photos/

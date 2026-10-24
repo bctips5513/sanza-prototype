@@ -1,0 +1,25 @@
+{
+  "name": "sanza-prototype",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:online": "vitest run --config vitest.online.config.ts"
+  },
+  "devDependencies": {
+    "@types/leaflet": "^1.9.22",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
+  },
+  "dependencies": {
+    "exifr": "^7.1.3",
+    "fast-png": "^8.0.0",
+    "geographiclib-geodesic": "^2.2.0",
+    "leaflet": "^1.9.4"
+  }
+}
