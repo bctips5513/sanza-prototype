@@ -1,8 +1,12 @@
 import {
   anglesFromAxes,
   angleBetween,
+  azElFromDir,
+  basis,
   cross,
   norm,
+  unproject,
+  type CameraParams,
   type Vec3,
 } from './camera';
 
@@ -91,4 +95,23 @@ export function residual(
   const dx = projected ? projected[0] - tapped[0] : NaN;
   const dy = projected ? projected[1] - tapped[1] : NaN;
   return { dx, dy, px: Math.hypot(dx, dy), deg: (angleBetween(dirTrue, dirTapped) * 180) / Math.PI };
+}
+
+/**
+ * 1点合わせ：傾きと焦点距離はそのままで、写真上の1点に山頂が来るよう方位・仰角だけを合わせる。
+ * （2点目を選ぶ前に大きなずれを取り除くための途中段階）
+ */
+export function align1pt(cam: CameraParams, px: number, py: number, dir: Vec3): { yaw: number; pitch: number } {
+  let { yaw, pitch } = cam;
+  const target = azElFromDir(dir);
+  for (let i = 0; i < 20; i++) {
+    const v = unproject({ ...cam, yaw, pitch }, basis(yaw, pitch, cam.roll), px, py);
+    const cur = azElFromDir(v);
+    const dAz = ((target.az - cur.az + 540) % 360) - 180;
+    const dEl = target.el - cur.el;
+    yaw = (((yaw + dAz) % 360) + 360) % 360;
+    pitch = Math.max(-89, Math.min(89, pitch + dEl));
+    if (Math.abs(dAz) < 1e-7 && Math.abs(dEl) < 1e-7) break;
+  }
+  return { yaw, pitch };
 }

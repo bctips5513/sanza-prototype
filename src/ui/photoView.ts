@@ -61,6 +61,7 @@ export class PhotoView {
         if (this.mode !== 'align' || !state.photo) return;
         const px = (x - this.ox) / this.scale;
         const py = (y - this.oy) / this.scale;
+        if (!Number.isFinite(px) || !Number.isFinite(py)) return;
         if (px < 0 || py < 0 || px > state.photo.cam.width || py > state.photo.cam.height) return;
         this.cb.onAlignTap(px, py);
       },
@@ -85,6 +86,7 @@ export class PhotoView {
     if (!ph) return;
     const w = this.canvas.clientWidth;
     const h = this.canvas.clientHeight;
+    if (w === 0 || h === 0) return; // 非表示中は表示されたときに合わせ直す
     this.scale = Math.min(w / ph.cam.width, h / ph.cam.height);
     this.ox = (w - ph.cam.width * this.scale) / 2;
     this.oy = (h - ph.cam.height * this.scale) / 2;

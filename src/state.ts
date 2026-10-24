@@ -11,6 +11,8 @@ export interface PhotoState {
   name: string;
   meta: PhotoMeta;
   cam: CameraParams;
+  /** 自動合わせの状態 */
+  auto: 'waiting' | 'running' | 'done';
 }
 
 export interface AlignTap {

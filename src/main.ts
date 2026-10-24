@@ -16,7 +16,8 @@ import {
   project,
   unproject,
 } from './photo/camera';
-import { align2pt, residual } from './photo/align2pt';
+import { align1pt, align2pt, residual } from './photo/align2pt';
+import { runAutoAlign } from './photo/autoAlignClient';
 import { direct, inverse } from './geo/geodesic';
 import { DEFAULT_SETTINGS, saveSettings, type DemTier } from './settings';
 import { PeakStatus } from './skyline/compute';
@@ -427,9 +428,17 @@ async function loadPhoto(file: File) {
   if (meta.direction !== undefined) {
     yaw = meta.direction;
     if (meta.directionRef === 'M') notes.push('撮影方位は磁北基準です（真北との差＝偏角 約7〜9°）。');
-    notes.push('EXIFの撮影方位は数十度ずれることがあります。合わない場合は2点合わせを使ってください。');
+    notes.push('EXIFの撮影方位は数十度ずれることがあるため、稜線の形による自動合わせで補正します。');
   } else notes.push('撮影方位がないため、現在のパノラマ中心の方位を初期値にしました。');
-  state.photo = { img, url, name: file.name, meta, cam: { yaw, pitch: 0, roll: 0, focalPx, width: W, height: H } };
+  state.photo = {
+    img,
+    url,
+    name: file.name,
+    meta,
+    cam: { yaw, pitch: 0, roll: 0, focalPx, width: W, height: H },
+    auto: 'waiting',
+  };
+  autoMessage('');
   state.alignTaps = [];
 
   const m = meta;
@@ -455,9 +464,99 @@ async function loadPhoto(file: File) {
     if (far) {
       setObserver(m.lat, m.lon, { pan: true });
       compute();
+      return;
     }
   }
+  maybeAutoAlign();
 }
+
+// ---------------------------------------------------------------- 自動合わせ
+function autoMessage(html: string) {
+  $('auto-info').innerHTML = html;
+}
+
+/** 稜線の計算結果がこの写真の撮影地点のものか */
+function resultMatchesPhoto(): boolean {
+  const ph = state.photo;
+  const r = state.result;
+  if (!ph || !r) return false;
+  const { lat, lon } = ph.meta;
+  if (lat === undefined || lon === undefined) return true;
+  return inverse(r.lat, r.lon, lat, lon).dist <= 10;
+}
+
+let autoSeq = 0;
+async function maybeAutoAlign(force = false) {
+  const ph = state.photo;
+  if (!ph || !state.result) return;
+  if (!force && ph.auto !== 'waiting') return;
+  if (!resultMatchesPhoto()) {
+    if (force) autoMessage('撮影地点の稜線を計算してから実行してください。');
+    return;
+  }
+  const r = state.result;
+  const seq = ++autoSeq;
+  ph.auto = 'running';
+  const hasDir = ph.meta.direction !== undefined;
+  const center = hasDir ? ph.meta.direction! : ph.cam.yaw;
+  const range = hasDir && !force ? 90 : 180;
+  autoMessage(`自動合わせ中…（${hasDir && !force ? `EXIF方位 ±${range}°` : '全方位'}を探索）`);
+  try {
+    const res = await runAutoAlign(
+      ph.img,
+      ph.cam.width,
+      ph.cam.focalPx,
+      r.bandElev[r.bandElev.length - 1],
+      r.azStep,
+      center,
+      range,
+      (d, t) => autoMessage(`自動合わせ中… ${Math.round((d / t) * 100)}%`),
+    );
+    if (seq !== autoSeq || state.photo !== ph) return;
+    ph.auto = 'done';
+    const b = res.best;
+    const conf = { high: '高', medium: '中', low: '低' }[res.confidence];
+    if (!b || res.confidence === 'low') {
+      autoMessage(
+        `自動合わせできませんでした（信頼度 ${conf}）。雲や逆光で稜線がはっきりしない可能性があります。2点合わせを使ってください。` +
+          (b ? ` <button id="btn-auto-apply">候補を試す（方位 ${b.yaw.toFixed(1)}°）</button>` : ''),
+      );
+      document.getElementById('btn-auto-apply')?.addEventListener('click', () => applyAuto(b!, conf, res.elapsedMs));
+      return;
+    }
+    // 自動合わせ中にユーザーが2点合わせを始めていたら上書きしない
+    if (state.alignTaps.some((t) => t.peakId !== undefined)) {
+      autoMessage(`自動合わせの候補：方位 ${b.yaw.toFixed(1)}°（2点合わせを優先したため未適用）`);
+      return;
+    }
+    applyAuto(b, conf, res.elapsedMs);
+  } catch (e) {
+    if (seq !== autoSeq) return;
+    ph.auto = 'done';
+    autoMessage(`自動合わせに失敗しました: ${esc((e as Error).message)}`);
+  }
+}
+
+function applyAuto(b: { yaw: number; pitch: number; roll: number }, conf: string, ms: number) {
+  const ph = state.photo;
+  if (!ph) return;
+  const exif = ph.meta.direction;
+  Object.assign(ph.cam, { yaw: b.yaw, pitch: b.pitch, roll: b.roll });
+  const diff = exif !== undefined ? ((b.yaw - exif + 540) % 360) - 180 : NaN;
+  autoMessage(
+    `自動合わせ：方位 ${b.yaw.toFixed(1)}°・仰角 ${b.pitch.toFixed(1)}°・傾き ${b.roll.toFixed(1)}°（信頼度 ${conf}・${(ms / 1000).toFixed(1)} 秒）` +
+      (Number.isFinite(diff) ? `・EXIF方位との差 ${diff > 0 ? '+' : ''}${diff.toFixed(1)}°` : ''),
+  );
+  refreshCamControls();
+  renderAlignPanel();
+  renderCamWedge();
+  photoView.request();
+}
+
+$('btn-auto').addEventListener('click', () => {
+  if (!state.photo) return;
+  maybeAutoAlign(true);
+});
 
 // カメラ調整コントロール
 interface Ctl {
@@ -594,6 +693,16 @@ function tryAlign() {
   const ph = state.photo;
   const [a, b] = state.alignTaps;
   alignMessage = '';
+  if (ph && a?.peakId !== undefined && b?.peakId === undefined) {
+    // 1点目だけ選んだ段階：方位・仰角だけを合わせ、2点目の候補が正しい順に並ぶようにする
+    const da = peakDir(a.peakId);
+    if (da) {
+      Object.assign(ph.cam, align1pt(ph.cam, a.px, a.py, da));
+      alignMessage = `1点目で方位・仰角を合わせました（方位 ${ph.cam.yaw.toFixed(2)}°・仰角 ${ph.cam.pitch.toFixed(2)}°）。2点目をタップすると傾きと画角も合わせます。`;
+      refreshCamControls();
+      renderCamWedge();
+    }
+  }
   if (ph && a?.peakId !== undefined && b?.peakId !== undefined) {
     const da = peakDir(a.peakId);
     const db = peakDir(b.peakId);
@@ -784,6 +893,7 @@ async function updateUsage() {
 
 on((what) => {
   if (what === 'settings') renderMapPeaks();
+  if (what === 'result') maybeAutoAlign();
 });
 
 // ---------------------------------------------------------------- 起動
