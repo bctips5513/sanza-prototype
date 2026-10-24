@@ -4,3 +4,4 @@ dist/
 *.log
 # テスト用写真はリポジトリに含めない
 test-photos/
+.cache/

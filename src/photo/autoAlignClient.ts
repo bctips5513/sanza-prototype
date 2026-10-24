@@ -49,7 +49,12 @@ export function runAutoAlign(
       else {
         wk.terminate();
         if (worker === wk) worker = null;
-        if (m.type === 'result') resolve(m.result);
+        if (m.type === 'result') {
+          // 焦点距離を元画像の画素単位に戻す
+          const r = m.result as AutoAlignResult;
+          for (const c of r.candidates) c.focalPx /= scale;
+          resolve(r);
+        }
         else reject(new Error(m.message));
       }
     };

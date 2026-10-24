@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:online": "vitest run --config vitest.online.config.ts"
+    "test:online": "vitest run --config vitest.online.config.ts",
+    "test:photos": "vitest run --config vitest.photos.config.ts tests/photos/autoAlign.photos.test.ts"
   },
   "devDependencies": {
     "@types/leaflet": "^1.9.22",

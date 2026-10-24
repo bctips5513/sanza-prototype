@@ -461,8 +461,9 @@ async function loadPhoto(file: File) {
   if (m.lat !== undefined && m.lon !== undefined) {
     const o = state.observer;
     const far = !o || inverse(o.lat, o.lon, m.lat, m.lon).dist > 10;
-    if (far) {
-      setObserver(m.lat, m.lon, { pan: true });
+    if (far) setObserver(m.lat, m.lon, { pan: true });
+    // 撮影地点の稜線がまだ無ければ計算する（計算後に自動合わせが走る）
+    if (far || !resultMatchesPhoto()) {
       compute();
       return;
     }
@@ -497,10 +498,9 @@ async function maybeAutoAlign(force = false) {
   const r = state.result;
   const seq = ++autoSeq;
   ph.auto = 'running';
-  const hasDir = ph.meta.direction !== undefined;
-  const center = hasDir ? ph.meta.direction! : ph.cam.yaw;
-  const range = hasDir && !force ? 90 : 180;
-  autoMessage(`自動合わせ中…（${hasDir && !force ? `EXIF方位 ±${range}°` : '全方位'}を探索）`);
+  // EXIF の撮影方位は数十〜90°以上ずれることがあるため、常に全方位を探す
+  const center = ph.meta.direction ?? ph.cam.yaw;
+  autoMessage('自動合わせ中…（全方位を探索）');
   try {
     const res = await runAutoAlign(
       ph.img,
@@ -509,7 +509,7 @@ async function maybeAutoAlign(force = false) {
       r.bandElev[r.bandElev.length - 1],
       r.azStep,
       center,
-      range,
+      180,
       (d, t) => autoMessage(`自動合わせ中… ${Math.round((d / t) * 100)}%`),
     );
     if (seq !== autoSeq || state.photo !== ph) return;
@@ -517,11 +517,28 @@ async function maybeAutoAlign(force = false) {
     const b = res.best;
     const conf = { high: '高', medium: '中', low: '低' }[res.confidence];
     if (!b || res.confidence === 'low') {
+      const cands = res.candidates.slice(0, 3);
       autoMessage(
-        `自動合わせできませんでした（信頼度 ${conf}）。雲や逆光で稜線がはっきりしない可能性があります。2点合わせを使ってください。` +
-          (b ? ` <button id="btn-auto-apply">候補を試す（方位 ${b.yaw.toFixed(1)}°）</button>` : ''),
+        `自動で決めきれませんでした（信頼度 ${conf}）。候補を試すか、2点合わせを使ってください。` +
+          cands
+            .map((c, i) => ` <button data-auto-cand="${i}">候補${i + 1}：方位 ${c.yaw.toFixed(1)}°</button>`)
+            .join(''),
       );
-      document.getElementById('btn-auto-apply')?.addEventListener('click', () => applyAuto(b!, conf, res.elapsedMs));
+      document.querySelectorAll<HTMLButtonElement>('[data-auto-cand]').forEach((bt) =>
+        bt.addEventListener('click', () => {
+          const c = cands[Number(bt.dataset.autoCand)];
+          applyAuto(c, conf, res.elapsedMs, `候補${Number(bt.dataset.autoCand) + 1}を適用：`);
+          // 他の候補にも切り替えられるよう、ボタンは残す
+          $('auto-info').append(
+            ...cands.map((cc, i) => {
+              const btn = document.createElement('button');
+              btn.textContent = `候補${i + 1}：方位 ${cc.yaw.toFixed(1)}°`;
+              btn.addEventListener('click', () => applyAuto(cc, conf, res.elapsedMs, `候補${i + 1}を適用：`));
+              return btn;
+            }),
+          );
+        }),
+      );
       return;
     }
     // 自動合わせ中にユーザーが2点合わせを始めていたら上書きしない
@@ -537,14 +554,19 @@ async function maybeAutoAlign(force = false) {
   }
 }
 
-function applyAuto(b: { yaw: number; pitch: number; roll: number }, conf: string, ms: number) {
+function applyAuto(
+  b: { yaw: number; pitch: number; roll: number; focalPx: number },
+  conf: string,
+  ms: number,
+  prefix = '自動合わせ：',
+) {
   const ph = state.photo;
   if (!ph) return;
   const exif = ph.meta.direction;
-  Object.assign(ph.cam, { yaw: b.yaw, pitch: b.pitch, roll: b.roll });
+  Object.assign(ph.cam, { yaw: b.yaw, pitch: b.pitch, roll: b.roll, focalPx: b.focalPx });
   const diff = exif !== undefined ? ((b.yaw - exif + 540) % 360) - 180 : NaN;
   autoMessage(
-    `自動合わせ：方位 ${b.yaw.toFixed(1)}°・仰角 ${b.pitch.toFixed(1)}°・傾き ${b.roll.toFixed(1)}°（信頼度 ${conf}・${(ms / 1000).toFixed(1)} 秒）` +
+    `${prefix}方位 ${b.yaw.toFixed(1)}°・仰角 ${b.pitch.toFixed(1)}°・傾き ${b.roll.toFixed(1)}°・水平画角 ${hfovDeg(ph.cam).toFixed(1)}°（信頼度 ${conf}・${(ms / 1000).toFixed(1)} 秒）` +
       (Number.isFinite(diff) ? `・EXIF方位との差 ${diff > 0 ? '+' : ''}${diff.toFixed(1)}°` : ''),
   );
   refreshCamControls();
@@ -901,3 +923,6 @@ renderSettings();
 renderAlignPanel();
 const m = location.hash.match(/ll=(-?[\d.]+),(-?[\d.]+)/);
 if (m) setObserver(parseFloat(m[1]), parseFloat(m[2]), { pan: true });
+
+// 開発時のみ：検証用に内部状態を公開
+if (import.meta.env.DEV) (window as unknown as { __sanza: unknown }).__sanza = { state };
