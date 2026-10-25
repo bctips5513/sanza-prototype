@@ -27,6 +27,7 @@ describe.skipIf(names.length === 0)('実写真での自動合わせ', () => {
         trim: process.env.AA_TRIM ? +process.env.AA_TRIM : undefined,
         useProfile: process.env.AA_PROFILE !== '0',
         exifYaw: c.direction,
+        useLine: process.env.AA_LINE !== '0',
         skyModel: (process.env.AA_SKY as 'fixed' | 'adaptive' | 'both' | undefined) ?? undefined,
         weights: process.env.AA_W ? { sky: +process.env.AA_W.split(',')[0], texture: +process.env.AA_W.split(',')[1] } : undefined,
       });

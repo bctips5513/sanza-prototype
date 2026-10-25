@@ -11,7 +11,7 @@ it('explore', async () => {
   for (const name of (process.env.EXPLORE ?? '').split(',').filter(Boolean)) {
     const c = await loadCase(name);
     const F0 = focalPxFrom35mm(c.focal35 ?? 26, c.width, c.height) * (c.w / c.width);
-    const r = autoAlign({ rgba: c.rgba, width: c.w, height: c.h, focalPx: F0, skyline: c.skyline, azStep: c.azStep, yawCenter: process.env.AA_CENTER ? +process.env.AA_CENTER : c.direction ?? 0, yawRange: process.env.AA_RANGE ? +process.env.AA_RANGE : 180, upMode: (process.env.AA_UP as 'local' | 'column' | 'blend' | undefined) ?? undefined, trim: process.env.AA_TRIM ? +process.env.AA_TRIM : undefined, skyModel: (process.env.AA_SKY as 'fixed' | 'adaptive' | 'both' | undefined) ?? undefined });
+    const r = autoAlign({ rgba: c.rgba, width: c.w, height: c.h, focalPx: F0, skyline: c.skyline, azStep: c.azStep, yawCenter: process.env.AA_CENTER ? +process.env.AA_CENTER : c.direction ?? 0, yawRange: process.env.AA_RANGE ? +process.env.AA_RANGE : 180, upMode: (process.env.AA_UP as 'local' | 'column' | 'blend' | undefined) ?? undefined, trim: process.env.AA_TRIM ? +process.env.AA_TRIM : undefined, skyModel: (process.env.AA_SKY as 'fixed' | 'adaptive' | 'both' | undefined) ?? undefined, useProfile: false, useLine: false });
     console.log(`${name} 信頼度=${r.confidence} 差=${r.margin.toFixed(2)} ${(r.elapsedMs / 1000).toFixed(1)}秒 EXIF方位=${c.direction?.toFixed(1)}`);
     const colors = ['#ff2d55', '#34c759', '#0a84ff'];
     const lines: string[] = [];

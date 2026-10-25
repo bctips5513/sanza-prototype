@@ -1,5 +1,6 @@
 import { basis, dirFromAzEl } from './camera';
 import { profileAlign } from './profileAlign';
+import { lineMatch } from './lineMatch';
 
 /**
  * 自動合わせ：写真の「空と山の境目」と計算した最外稜線が最もよく重なるカメラ姿勢を探す。
@@ -9,7 +10,8 @@ import { profileAlign } from './profileAlign';
  * - きめ（局所的な明暗変化）：下 − 上。空は雲・曇天でも滑らかで、山肌は岩・雪渓・樹林で細かい。
  *   曇天で雪の山肌が空より明るく写る場合でも効く
  *
- * （境目の鋭さ＝符号なしの明暗変化も試したが、湖岸や雲の縁に引っかかり成績が落ちたため不採用）
+ * （境目の鋭さ＝符号なしの明暗変化、稜線の向きに合わせた構造テンソルも試したが、前者は湖岸や雲の縁に引っかかり、
+ *  後者は効果が小さいわりに時間が約3倍になるため不採用。形の一致は lineMatch で補う）
  *
  * 1) 広い窓で方位（全周）・仰角・傾きを粗く総当たりし、方位の異なる上位候補を残す
  * 2) 候補ごとに狭い窓で、方位・仰角・傾き・焦点距離（EXIF 値の ±10%）を山登り法で詰める
@@ -42,6 +44,8 @@ export interface AutoAlignInput {
   trim?: number;
   /** 空らしさの求め方（検証用）：fixed = 明るさ＋青み、adaptive = 写真上端の色に近いか、both = 両方（既定） */
   skyModel?: 'fixed' | 'adaptive' | 'both';
+  /** 線の一致も使うか（既定 true。上の方法で自信が持てないときだけ走らせる） */
+  useLine?: boolean;
   /** 空の境目への当てはめも使うか（既定 true） */
   useProfile?: boolean;
   /** EXIF の撮影方位 [deg]。ここから大きく離れた答えは自動では適用しない（信頼度を「低」にする） */
@@ -63,8 +67,8 @@ export interface AutoAlignResult {
   confidence: 'high' | 'medium' | 'low';
   /** 次点（方位が 2° 以上異なる候補）との得点比 */
   margin: number;
-  /** 採用した方法：shape = 稜線まわりの明暗・きめ、profile = 空の境目への当てはめ、both = 両者が一致 */
-  method: 'shape' | 'profile' | 'both';
+  /** 採用した方法：shape = 稜線まわりの明暗・きめ、profile = 空の境目への当てはめ、line = 線の一致、both = 2つの方法が一致 */
+  method: 'shape' | 'profile' | 'line' | 'both';
   /** 空の境目への当てはめのずれ [px]（縮小画像上。当てはめできなければ null） */
   profileErr: number | null;
   /** 線より上のきめ ÷ 線の下のきめ（診断用） */
@@ -377,13 +381,39 @@ export function autoAlign(inp: AutoAlignInput, onProgress?: (done: number, total
       }
     }
   }
-  const aboveRatio = finalBest ? aboveTexture(finalBest) : NaN;
   // EXIF の方位は数十度ずれることがあるが、正反対のような答えは誤りの可能性が高い
   let farFromExif = false;
   if (finalBest && inp.exifYaw !== undefined && Math.abs(angDiff(finalBest.yaw, inp.exifYaw)) > EXIF_MAX_DIFF) {
     farFromExif = true;
     finalConf = 'low';
   }
+
+  // 線の一致：まだ自信が持てないときだけ走らせる（形の一致で霞・雲・雪の写真を補う）
+  if (inp.useLine !== false && finalConf !== 'high') {
+    const lm = lineMatch({ rgba, width: w, height: h, focalPx: F0, skyline, azStep });
+    const lb = lm[0];
+    if (lb) {
+      const lc: AutoAlignCandidate = { yaw: lb.yaw, pitch: lb.pitch, roll: lb.roll, focalPx: lb.focalPx, score: -lb.cost };
+      const agrees = finalBest && Math.abs(angDiff(finalBest.yaw, lb.yaw)) < 1 && Math.abs(finalBest.pitch - lb.pitch) < 1;
+      if (agrees) {
+        // 独立した2つの方法が同じ答え
+        method = 'both';
+        finalConf = 'high';
+      } else if (finalConf === 'low') {
+        // 上の方法が決めきれないときは、線の一致の答えを候補の先頭にする（自動適用はしない）
+        method = 'line';
+        finalBest = lc;
+        finalCands = [lc, ...finalCands.filter((u) => Math.abs(angDiff(u.yaw, lc.yaw)) > 2)];
+      } else {
+        finalCands = [...finalCands.slice(0, 1), lc, ...finalCands.slice(1).filter((u) => Math.abs(angDiff(u.yaw, lc.yaw)) > 2)];
+      }
+    }
+  }
+  if (finalBest && inp.exifYaw !== undefined && Math.abs(angDiff(finalBest.yaw, inp.exifYaw)) > EXIF_MAX_DIFF && method !== 'both') {
+    farFromExif = true;
+    finalConf = 'low';
+  }
+  const aboveRatio = finalBest ? aboveTexture(finalBest) : NaN;
   return {
     aboveRatio,
     farFromExif,
