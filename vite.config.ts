@@ -33,6 +33,6 @@ export default defineConfig({
   },
   test: {
     include: ['tests/**/*.test.ts'],
-    exclude: ['tests/online/**'],
+    exclude: ['tests/online/**', 'tests/photos/**'],
   },
 });

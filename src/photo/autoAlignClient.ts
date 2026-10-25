@@ -15,6 +15,7 @@ export function runAutoAlign(
   azStep: number,
   yawCenter: number,
   yawRange: number,
+  exifYaw: number | undefined,
   onProgress?: (done: number, total: number) => void,
 ): Promise<AutoAlignResult> {
   const scale = SIZE / fullWidth;
@@ -39,6 +40,7 @@ export function runAutoAlign(
     azStep,
     yawCenter,
     yawRange,
+    exifYaw,
   };
   return new Promise((resolve, reject) => {
     const wk = worker!;

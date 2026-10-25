@@ -510,6 +510,7 @@ async function maybeAutoAlign(force = false) {
       r.azStep,
       center,
       180,
+      ph.meta.direction,
       (d, t) => autoMessage(`自動合わせ中… ${Math.round((d / t) * 100)}%`),
     );
     if (seq !== autoSeq || state.photo !== ph) return;
@@ -518,8 +519,11 @@ async function maybeAutoAlign(force = false) {
     const conf = { high: '高', medium: '中', low: '低' }[res.confidence];
     if (!b || res.confidence === 'low') {
       const cands = res.candidates.slice(0, 3);
+      const why = res.farFromExif && b
+        ? `最有力の答え（方位 ${b.yaw.toFixed(1)}°）がEXIFの方位から大きく離れているため、自動では適用しません。`
+        : `自動で決めきれませんでした（信頼度 ${conf}）。`;
       autoMessage(
-        `自動で決めきれませんでした（信頼度 ${conf}）。候補を試すか、2点合わせを使ってください。` +
+        `${why}候補を試すか、2点合わせを使ってください。` +
           cands
             .map((c, i) => ` <button data-auto-cand="${i}">候補${i + 1}：方位 ${c.yaw.toFixed(1)}°</button>`)
             .join(''),
@@ -546,7 +550,7 @@ async function maybeAutoAlign(force = false) {
       autoMessage(`自動合わせの候補：方位 ${b.yaw.toFixed(1)}°（2点合わせを優先したため未適用）`);
       return;
     }
-    applyAuto(b, conf, res.elapsedMs);
+    applyAuto(b, conf, res.elapsedMs, res.method === 'profile' ? '自動合わせ（空の境目に当てはめ）：' : res.method === 'both' ? '自動合わせ（2つの方法が一致）：' : '自動合わせ：');
   } catch (e) {
     if (seq !== autoSeq) return;
     ph.auto = 'done';

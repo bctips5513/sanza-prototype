@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import exifr from 'exifr';
-import { decode } from 'fast-png';
+import { decode, encode } from 'fast-png';
 import { TileStore } from '../../src/dem/tileStore';
 import { SkylineEngine } from '../../src/skyline/compute';
 import { DEFAULT_SETTINGS } from '../../src/settings';
@@ -50,13 +50,25 @@ export interface PhotoCase {
 export async function loadCase(name: string): Promise<PhotoCase> {
   const path = join(PHOTO_DIR, name);
   const t = await exifr.parse(path, { tiff: true, exif: true, gps: true, xmp: false });
-  const width = t.ExifImageWidth;
-  const height = t.ExifImageHeight;
+  // EXIF の回転（縦写真）を反映した表示上の大きさ。ブラウザも同じく回転して表示する
+  const ori: number = typeof t.Orientation === 'number' ? t.Orientation : ({ 'Rotate 90 CW': 6, 'Rotate 270 CW': 8, 'Rotate 180': 3 } as Record<string, number>)[t.Orientation] ?? 1;
+  const rotate = ori === 6 ? 90 : ori === 8 ? 270 : ori === 3 ? 180 : 0;
+  const swap = rotate === 90 || rotate === 270;
+  const width = swap ? t.ExifImageHeight : t.ExifImageWidth;
+  const height = swap ? t.ExifImageWidth : t.ExifImageHeight;
 
   // 縮小画像（幅 800px）
   mkdirSync(CACHE, { recursive: true });
   const png = join(CACHE, `${name}.800.png`);
-  if (!existsSync(png)) execFileSync('sips', ['--resampleWidth', '800', '-s', 'format', 'png', path, '--out', png]);
+  if (!existsSync(png)) {
+    // sips は PNG 変換時に回転情報を画素へ反映しないため、明示的に回す（HEIC も sips で読める）
+    const args = rotate ? ['--rotate', String(rotate)] : [];
+    execFileSync('sips', [...args, '-s', 'format', 'png', path, '--out', png]);
+    execFileSync('sips', ['--resampleWidth', '800', png, '--out', png]);
+    // sips の PNG には回転情報（eXIf）が残り、表示側で二重に回されるため、画素だけで書き直す
+    const raw = decode(readFileSync(png));
+    writeFileSync(png, encode({ width: raw.width, height: raw.height, data: raw.data, channels: raw.channels, depth: raw.depth }));
+  }
   const img = decode(readFileSync(png));
   const n = img.width * img.height;
   const rgba = new Uint8ClampedArray(n * 4);
