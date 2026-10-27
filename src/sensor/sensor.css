@@ -152,3 +152,46 @@
   border-radius: 8px;
   margin: 6px 0;
 }
+
+/* 全画面（照準モード）：iPhone の Safari は要素の全画面表示に対応しないため、固定配置で画面を覆う */
+.cam-wrap.full {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100dvh;
+  min-height: 0;
+  z-index: 3000;
+}
+.cam-wrap.full .hud {
+  top: calc(8px + env(safe-area-inset-top));
+  font-size: 15px;
+}
+.cam-wrap.full .cam-bar {
+  padding-bottom: calc(10px + env(safe-area-inset-bottom));
+}
+body.no-scroll {
+  overflow: hidden;
+}
+#btn-timer[aria-pressed='true'],
+#btn-full[aria-pressed='true'] {
+  background: #ffcc00;
+  color: #000;
+  border-color: #ffcc00;
+}
+.countdown {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -130%);
+  color: #fff;
+  font-size: 48px;
+  font-weight: 700;
+  text-shadow: 0 0 6px #000;
+  pointer-events: none;
+}
+.rec-row {
+  flex-wrap: wrap;
+}
+.cam-target {
+  min-width: 100%;
+}

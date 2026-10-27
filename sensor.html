@@ -17,6 +17,7 @@
         <video id="video" playsinline muted autoplay></video>
         <div class="crosshair"></div>
         <div id="hud" class="hud"></div>
+        <div id="countdown" class="countdown hidden"></div>
         <div class="cam-bar">
           <div class="zoom-row">
             <select id="sel-camera" aria-label="カメラ"></select>
@@ -27,6 +28,8 @@
           </div>
           <div class="rec-row">
             <span id="cam-target" class="cam-target">目標：未選択</span>
+            <button id="btn-full" class="cam-undo" aria-label="全画面の切り替え">全画面</button>
+            <button id="btn-timer" class="cam-undo" aria-pressed="false">タイマー</button>
             <button id="btn-undo" class="cam-undo">取消</button>
             <button id="btn-record" class="cam-record">記録</button>
           </div>

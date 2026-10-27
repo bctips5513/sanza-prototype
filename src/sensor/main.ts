@@ -438,20 +438,70 @@ try {
   /* ignore */
 }
 
-$('btn-record').addEventListener('click', () => {
+// ---------------------------------------------------------------- 全画面・タイマー
+let timerOn = false;
+let counting = false;
+
+$('btn-full').addEventListener('click', () => {
+  const wrap = document.querySelector('.cam-wrap')!;
+  const full = wrap.classList.toggle('full');
+  document.body.classList.toggle('no-scroll', full);
+  $('btn-full').setAttribute('aria-pressed', String(full));
+  $('btn-full').textContent = full ? '閉じる' : '全画面';
+});
+
+$('btn-timer').addEventListener('click', () => {
+  timerOn = !timerOn;
+  $('btn-timer').setAttribute('aria-pressed', String(timerOn));
+  $('btn-timer').textContent = timerOn ? 'タイマー2秒' : 'タイマー';
+});
+
+$('btn-record').addEventListener('click', async () => {
+  if (counting) return;
+  if (timerOn) {
+    // 押したあと2秒待ち、指の揺れが収まってから記録する
+    counting = true;
+    const cd = $('countdown');
+    cd.classList.remove('hidden');
+    for (const n of [2, 1]) {
+      cd.textContent = String(n);
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    cd.classList.add('hidden');
+    counting = false;
+    recordNow(0);
+  } else recordNow(150);
+});
+
+/** 全画面でも見えるよう、映像の上に短いメッセージを出す */
+function flash(text: string, ms = 1500) {
+  const cd = $('countdown');
+  cd.textContent = text;
+  cd.style.fontSize = text.length > 3 ? '18px' : '';
+  cd.classList.remove('hidden');
+  setTimeout(() => {
+    cd.classList.add('hidden');
+    cd.style.fontSize = '';
+  }, ms);
+}
+
+/** 記録：excludeMs = 直前の除外時間（押す指のブレ）。その前の 0.7 秒間の平均を使う */
+function recordNow(excludeMs: number) {
   const c = current();
   const t = targetAz();
   if (!c) {
     $('rec-out').textContent = '先に「計測開始」を押してください';
+    flash('先に「計測開始」を押してください');
     return;
   }
   if (t === null) {
     $('rec-out').textContent = '目標の山を選ぶか、真方位を入力してください';
+    flash('目標が未選択です');
     return;
   }
-  // 押す直前 0.15 秒（指で押すときのブレ）を除いた 0.7 秒間の平均
+  // 押す直前（指で押すときのブレ）を除いた 0.7 秒間の平均
   const now = performance.now();
-  let recent = history.filter((s) => now - s.t >= 150 && now - s.t < 850 && s.beta !== null && s.gamma !== null);
+  let recent = history.filter((s) => now - s.t >= excludeMs && now - s.t < excludeMs + 700 && s.beta !== null && s.gamma !== null);
   if (recent.length < 3) recent = history.filter((s) => c.s.t - s.t < 500 && s.beta !== null && s.gamma !== null);
   const cams = recent.map((s) => cameraAngles(s.alpha ?? 0, s.beta!, s.gamma!, s.screenAngle));
   const comp = recent.map((s) => s.compass).filter((v): v is number => v !== null);
@@ -484,7 +534,10 @@ $('btn-record').addEventListener('click', () => {
   const last = records[records.length - 1];
   $('status').textContent = `記録 ${records.length} 件目：${last.target} 差 ${last.compass !== null ? fmt(angDiff(last.compass, last.trueAz)) : fmt(angDiff(last.headingFromAlpha, last.trueAz))}°`;
   navigator.vibrate?.(30);
-});
+  // 全画面でも記録したことが分かるよう、映像の上にも一瞬表示
+  const err = last.compass !== null ? angDiff(last.compass, last.trueAz) : angDiff(last.headingFromAlpha, last.trueAz);
+  flash(`✓ ${records.length}件目 差 ${fmt(err)}°`);
+}
 
 $('btn-undo').addEventListener('click', () => {
   records.pop();
