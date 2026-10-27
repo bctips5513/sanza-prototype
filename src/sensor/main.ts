@@ -1,4 +1,6 @@
+import 'leaflet/dist/leaflet.css';
 import '../ui/style.css';
+import L from 'leaflet';
 import './sensor.css';
 import { fetchPeaks, type Peak } from '../peaks/overpass';
 import { inverse } from '../geo/geodesic';
@@ -96,6 +98,7 @@ $('btn-start').addEventListener('click', async () => {
       (p) => {
         gps = p;
         $('gps-out').textContent = `現在地 ${p.coords.latitude.toFixed(5)}, ${p.coords.longitude.toFixed(5)}（±${Math.round(p.coords.accuracy)} m）`;
+        renderMapTarget();
       },
       (err) => ($('gps-out').textContent = `位置情報: ${err.message}`),
       { enableHighAccuracy: true },
@@ -303,11 +306,76 @@ function renderPeaks() {
     .join('');
 }
 $('peak-filter').addEventListener('input', renderPeaks);
+$('sel-peak').addEventListener('change', () => {
+  // 一覧で山を選んだら地図の目標は解除
+  mapTarget = null;
+  tMarker?.remove();
+  tMarker = null;
+  renderMapTarget();
+});
+
+// 地図で選んだ目標
+let mapTarget: { lat: number; lon: number } | null = null;
+let tmap: L.Map | null = null;
+let tMarker: L.CircleMarker | null = null;
+let meMarker: L.CircleMarker | null = null;
+
+$('map-box').addEventListener('toggle', () => {
+  if (!($('map-box') as HTMLDetailsElement).open) return;
+  if (!tmap) {
+    const c = gps ? [gps.coords.latitude, gps.coords.longitude] : [36.21, 137.97];
+    tmap = L.map('target-map').setView(c as [number, number], 12);
+    L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', {
+      maxZoom: 18,
+      attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank">地理院タイル</a>',
+    }).addTo(tmap);
+    tmap.on('click', (e: L.LeafletMouseEvent) => {
+      mapTarget = { lat: e.latlng.lat, lon: e.latlng.lng };
+      ($('in-target') as HTMLInputElement).value = '';
+      if (tMarker) tMarker.setLatLng(e.latlng);
+      else tMarker = L.circleMarker(e.latlng, { radius: 7, color: '#ff2d55', weight: 3, fillOpacity: 0.3 }).addTo(tmap!);
+      renderMapTarget();
+    });
+  }
+  setTimeout(() => tmap?.invalidateSize(), 0);
+  if (gps) {
+    const ll: [number, number] = [gps.coords.latitude, gps.coords.longitude];
+    if (meMarker) meMarker.setLatLng(ll);
+    else meMarker = L.circleMarker(ll, { radius: 6, color: '#0a6cff', weight: 3, fillOpacity: 0.8 }).addTo(tmap).bindTooltip('現在地');
+  }
+});
+
+function renderMapTarget() {
+  const out = $('map-target-out');
+  if (!mapTarget) {
+    out.textContent = '';
+    return;
+  }
+  if (!gps) {
+    out.textContent = '現在地を取得中です（「計測開始」を押してください）';
+    return;
+  }
+  const inv = inverse(gps.coords.latitude, gps.coords.longitude, mapTarget.lat, mapTarget.lon);
+  const errDeg = ((gps.coords.accuracy + 10) / inv.dist) * (180 / Math.PI);
+  out.innerHTML = `目標：${mapTarget.lat.toFixed(5)}, ${mapTarget.lon.toFixed(5)}・距離 ${(inv.dist / 1000).toFixed(2)} km・真方位 <b>${inv.az.toFixed(2)}°</b>（位置のずれによる方位の誤差 約±${errDeg.toFixed(2)}°）` +
+    (inv.dist < 3000 ? '<br>※ 3 km より近いので、方位の誤差が大きくなります' : '');
+}
+
+$('btn-map-clear').addEventListener('click', () => {
+  mapTarget = null;
+  tMarker?.remove();
+  tMarker = null;
+  renderMapTarget();
+});
 
 /** 選んだ山（現在地からの真方位）または直接入力の真方位 */
 function targetAz(): number | null {
   const manual = parseFloat(($('in-target') as HTMLInputElement).value);
   if (Number.isFinite(manual)) return manual;
+  if (mapTarget) {
+    if (!gps) return null;
+    return inverse(gps.coords.latitude, gps.coords.longitude, mapTarget.lat, mapTarget.lon).az;
+  }
   const id = Number(($('sel-peak') as HTMLSelectElement).value);
   const p = peaks.find((x) => x.id === id);
   if (!p) return null;
@@ -318,6 +386,7 @@ function targetAz(): number | null {
 function targetName(): string {
   const manual = ($('in-target') as HTMLInputElement).value;
   if (manual) return '（直接入力）';
+  if (mapTarget) return `地図 ${mapTarget.lat.toFixed(4)},${mapTarget.lon.toFixed(4)}`;
   const id = Number(($('sel-peak') as HTMLSelectElement).value);
   return peaks.find((x) => x.id === id)?.name ?? '';
 }
@@ -339,6 +408,9 @@ interface Rec {
   lat: number | null;
   lon: number | null;
   gpsAcc: number | null;
+  /** 地図で選んだ目標の座標 */
+  targetLat: number | null;
+  targetLon: number | null;
   camera: string;
   zoom: number;
   /** camera = カメラ側のズーム、display = 映像の拡大表示 */
@@ -400,6 +472,8 @@ $('btn-record').addEventListener('click', () => {
     lat: gps?.coords.latitude ?? null,
     lon: gps?.coords.longitude ?? null,
     gpsAcc: gps?.coords.accuracy ?? null,
+    targetLat: mapTarget?.lat ?? null,
+    targetLon: mapTarget?.lon ?? null,
     camera: cameraLabel(),
     zoom,
     zoomMode: hwZoom ? 'camera' : 'display',
@@ -446,7 +520,7 @@ renderRecords();
 
 // ---------------------------------------------------------------- 3. 書き出し
 $('btn-csv').addEventListener('click', () => {
-  const keys: (keyof Rec)[] = ['time', 'target', 'trueAz', 'compass', 'compassAcc', 'alpha', 'beta', 'gamma', 'absolute', 'screenAngle', 'headingFromAlpha', 'elev', 'roll', 'lat', 'lon', 'gpsAcc', 'camera', 'zoom', 'zoomMode', 'ua'];
+  const keys: (keyof Rec)[] = ['time', 'target', 'trueAz', 'compass', 'compassAcc', 'alpha', 'beta', 'gamma', 'absolute', 'screenAngle', 'headingFromAlpha', 'elev', 'roll', 'lat', 'lon', 'gpsAcc', 'targetLat', 'targetLon', 'camera', 'zoom', 'zoomMode', 'ua'];
   const lines = [keys.join(',')];
   for (const r of records) lines.push(keys.map((k) => JSON.stringify(r[k] ?? '')).join(','));
   lines.push('', 'still_time,n,headStd,elevStd,rollStd');

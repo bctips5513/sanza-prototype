@@ -54,9 +54,19 @@
           <div id="gps-out" class="small"></div>
           <input type="text" id="peak-filter" placeholder="山名で絞り込み" />
           <select id="sel-peak" size="6" class="peak-select"></select>
-          <div class="row">
-            <label>または目標の真方位を直接入力 [°]<input id="in-target" type="number" step="0.1" inputmode="decimal" /></label>
-          </div>
+          <details id="map-box" class="map-box">
+            <summary>地図で目標を選ぶ（鉄塔・建物・橋なども可）</summary>
+            <p class="small">見えている目標の位置を地図でタップしてください。3 km 以上離れた目標がおすすめです（近いと地図やGPSの数mのずれが方位の誤差になります）。</p>
+            <div id="target-map" class="target-map"></div>
+            <div id="map-target-out" class="small"></div>
+            <div class="row"><button id="btn-map-clear">地図の目標を解除</button></div>
+          </details>
+          <details class="map-box">
+            <summary>真方位が分かっている場合は直接入力</summary>
+            <div class="row">
+              <label>目標の真方位 [°]<input id="in-target" type="number" step="0.1" inputmode="decimal" /></label>
+            </div>
+          </details>
           <p class="small">
             照準（画面中央の十字）を山頂に合わせて、映像の右下の「記録」。押す指のブレを避けるため、押す直前0.15秒を除いた0.7秒間の平均を記録します。向きを変えたり1周回したりしてから同じ山で繰り返すと、ずれの変化も分かります。縦持ち・横持ちの両方で試してください。
           </p>
