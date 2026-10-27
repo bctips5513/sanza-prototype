@@ -85,11 +85,8 @@ $('btn-start').addEventListener('click', async () => {
   window.addEventListener('deviceorientationabsolute' as 'deviceorientation', (e) => onOrientation(e as DeviceOrientationEvent, true));
 
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 } },
-      audio: false,
-    });
-    ($('video') as HTMLVideoElement).srcObject = stream;
+    await startCamera();
+    await listCameras();
   } catch (e) {
     msgs.push(`カメラ: ${(e as Error).message}`);
   }
@@ -107,6 +104,69 @@ $('btn-start').addEventListener('click', async () => {
   $('status').textContent = msgs.length ? msgs.join(' / ') : '計測中';
   requestAnimationFrame(loop);
 });
+
+// ---------------------------------------------------------------- カメラ・ズーム
+const video = $('video') as HTMLVideoElement;
+let stream: MediaStream | null = null;
+let zoom = 1;
+/** カメラ側のズームを使えているか（使えなければ映像を拡大表示する） */
+let hwZoom = false;
+
+async function startCamera(deviceId?: string) {
+  stream?.getTracks().forEach((t) => t.stop());
+  stream = await navigator.mediaDevices.getUserMedia({
+    video: deviceId
+      ? { deviceId: { exact: deviceId }, width: { ideal: 1920 } }
+      : { facingMode: { ideal: 'environment' }, width: { ideal: 1920 } },
+    audio: false,
+  });
+  video.srcObject = stream;
+  await applyZoom(zoom);
+}
+
+async function listCameras() {
+  const devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
+  const sel = $('sel-camera') as HTMLSelectElement;
+  const current = stream?.getVideoTracks()[0]?.getSettings().deviceId;
+  sel.innerHTML = devs
+    .map((d, i) => `<option value="${d.deviceId}" ${d.deviceId === current ? 'selected' : ''}>${esc(d.label || `カメラ${i + 1}`)}</option>`)
+    .join('');
+}
+
+$('sel-camera').addEventListener('change', async (e) => {
+  try {
+    await startCamera((e.target as HTMLSelectElement).value);
+  } catch (err) {
+    $('status').textContent = `カメラを切り替えられません: ${(err as Error).message}`;
+  }
+});
+
+async function applyZoom(z: number) {
+  zoom = z;
+  hwZoom = false;
+  const track = stream?.getVideoTracks()[0];
+  const caps = (track?.getCapabilities?.() ?? {}) as MediaTrackCapabilities & { zoom?: { min: number; max: number } };
+  if (track && caps.zoom && z >= caps.zoom.min && z <= caps.zoom.max) {
+    try {
+      await track.applyConstraints({ advanced: [{ zoom: z } as MediaTrackConstraintSet] });
+      hwZoom = true;
+    } catch {
+      hwZoom = false;
+    }
+  }
+  // カメラ側でズームできないときは映像を中央から拡大表示（照準は常に中央）
+  video.style.transform = hwZoom ? '' : `scale(${z})`;
+  document.querySelectorAll<HTMLButtonElement>('[data-zoom]').forEach((b) => b.classList.toggle('active', Number(b.dataset.zoom) === z));
+}
+
+document.querySelectorAll<HTMLButtonElement>('[data-zoom]').forEach((b) =>
+  b.addEventListener('click', () => applyZoom(Number(b.dataset.zoom))),
+);
+
+function cameraLabel(): string {
+  const sel = $('sel-camera') as HTMLSelectElement;
+  return sel.selectedOptions[0]?.textContent ?? '';
+}
 
 // ---------------------------------------------------------------- 表示
 const chart = $('chart') as HTMLCanvasElement;
@@ -129,6 +189,9 @@ function loop() {
       `absolute ${s.absolute}  画面の向き ${s.screenAngle}°  更新 ${rateHz} Hz\n` +
       `alpha から求めたカメラ方位 ${fmt(cam.headingFromAlpha, 2)}°`;
   }
+  const tn = targetName();
+  const ta = targetAz();
+  $('cam-target').textContent = ta !== null ? `目標：${tn}（${fmt(ta)}°）` : '目標：未選択（下で山を選ぶ）';
   drawChart();
   requestAnimationFrame(loop);
 }
@@ -276,6 +339,10 @@ interface Rec {
   lat: number | null;
   lon: number | null;
   gpsAcc: number | null;
+  camera: string;
+  zoom: number;
+  /** camera = カメラ側のズーム、display = 映像の拡大表示 */
+  zoomMode: 'camera' | 'display';
   ua: string;
 }
 
@@ -310,8 +377,10 @@ $('btn-record').addEventListener('click', () => {
     $('rec-out').textContent = '目標の山を選ぶか、真方位を入力してください';
     return;
   }
-  // 直近0.5秒の平均（手ブレを抑える）
-  const recent = history.filter((s) => c.s.t - s.t < 500 && s.beta !== null && s.gamma !== null);
+  // 押す直前 0.15 秒（指で押すときのブレ）を除いた 0.7 秒間の平均
+  const now = performance.now();
+  let recent = history.filter((s) => now - s.t >= 150 && now - s.t < 850 && s.beta !== null && s.gamma !== null);
+  if (recent.length < 3) recent = history.filter((s) => c.s.t - s.t < 500 && s.beta !== null && s.gamma !== null);
   const cams = recent.map((s) => cameraAngles(s.alpha ?? 0, s.beta!, s.gamma!, s.screenAngle));
   const comp = recent.map((s) => s.compass).filter((v): v is number => v !== null);
   records.push({
@@ -331,10 +400,16 @@ $('btn-record').addEventListener('click', () => {
     lat: gps?.coords.latitude ?? null,
     lon: gps?.coords.longitude ?? null,
     gpsAcc: gps?.coords.accuracy ?? null,
+    camera: cameraLabel(),
+    zoom,
+    zoomMode: hwZoom ? 'camera' : 'display',
     ua: navigator.userAgent,
   });
   save();
   renderRecords();
+  const last = records[records.length - 1];
+  $('status').textContent = `記録 ${records.length} 件目：${last.target} 差 ${last.compass !== null ? fmt(angDiff(last.compass, last.trueAz)) : fmt(angDiff(last.headingFromAlpha, last.trueAz))}°`;
+  navigator.vibrate?.(30);
 });
 
 $('btn-undo').addEventListener('click', () => {
@@ -371,7 +446,7 @@ renderRecords();
 
 // ---------------------------------------------------------------- 3. 書き出し
 $('btn-csv').addEventListener('click', () => {
-  const keys: (keyof Rec)[] = ['time', 'target', 'trueAz', 'compass', 'compassAcc', 'alpha', 'beta', 'gamma', 'absolute', 'screenAngle', 'headingFromAlpha', 'elev', 'roll', 'lat', 'lon', 'gpsAcc', 'ua'];
+  const keys: (keyof Rec)[] = ['time', 'target', 'trueAz', 'compass', 'compassAcc', 'alpha', 'beta', 'gamma', 'absolute', 'screenAngle', 'headingFromAlpha', 'elev', 'roll', 'lat', 'lon', 'gpsAcc', 'camera', 'zoom', 'zoomMode', 'ua'];
   const lines = [keys.join(',')];
   for (const r of records) lines.push(keys.map((k) => JSON.stringify(r[k] ?? '')).join(','));
   lines.push('', 'still_time,n,headStd,elevStd,rollStd');

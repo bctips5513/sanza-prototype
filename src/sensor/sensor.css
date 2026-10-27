@@ -39,11 +39,14 @@
   height: 2px;
   width: 44px;
 }
+.cam-wrap video {
+  transform-origin: 50% 50%;
+}
 .hud {
   position: absolute;
   left: 8px;
   right: 8px;
-  bottom: 8px;
+  top: 8px;
   color: #fff;
   font-size: 13px;
   line-height: 1.5;
@@ -68,4 +71,70 @@
   font-size: 11px;
   white-space: pre-wrap;
   margin: 6px 0 0;
+}
+
+.cam-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 6px 8px 8px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.6), rgba(0, 0, 0, 0));
+}
+.zoom-row,
+.rec-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.zoom-row {
+  margin-bottom: 6px;
+}
+.zoom-row button {
+  padding: 4px 10px;
+  font-size: 13px;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+}
+.zoom-row button.active {
+  background: #ffcc00;
+  color: #000;
+  border-color: #ffcc00;
+}
+.zoom-row select {
+  width: auto;
+  max-width: 45%;
+  font-size: 13px;
+  padding: 4px 6px;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+}
+.cam-target {
+  flex: 1;
+  color: #fff;
+  font-size: 13px;
+  text-shadow: 0 0 3px #000;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.cam-record {
+  font-size: 17px;
+  font-weight: 700;
+  padding: 12px 22px;
+  border-radius: 999px;
+  background: #ff2d55;
+  color: #fff;
+  border: 2px solid #fff;
+}
+.cam-record:active {
+  transform: scale(0.96);
+}
+.cam-undo {
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.5);
 }

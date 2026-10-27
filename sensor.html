@@ -17,6 +17,20 @@
         <video id="video" playsinline muted autoplay></video>
         <div class="crosshair"></div>
         <div id="hud" class="hud"></div>
+        <div class="cam-bar">
+          <div class="zoom-row">
+            <select id="sel-camera" aria-label="カメラ"></select>
+            <button data-zoom="1" class="active">1×</button>
+            <button data-zoom="2">2×</button>
+            <button data-zoom="4">4×</button>
+            <button data-zoom="8">8×</button>
+          </div>
+          <div class="rec-row">
+            <span id="cam-target" class="cam-target">目標：未選択</span>
+            <button id="btn-undo" class="cam-undo">取消</button>
+            <button id="btn-record" class="cam-record">記録</button>
+          </div>
+        </div>
       </div>
       <div class="panel">
         <div class="row wrap">
@@ -44,9 +58,8 @@
             <label>または目標の真方位を直接入力 [°]<input id="in-target" type="number" step="0.1" inputmode="decimal" /></label>
           </div>
           <p class="small">
-            照準（画面中央の十字）を山頂に合わせて「記録」。向きを変えたり1周回したりしてから同じ山で繰り返すと、ずれの変化も分かります。縦持ち・横持ちの両方で試してください。
+            照準（画面中央の十字）を山頂に合わせて、映像の右下の「記録」。押す指のブレを避けるため、押す直前0.15秒を除いた0.7秒間の平均を記録します。向きを変えたり1周回したりしてから同じ山で繰り返すと、ずれの変化も分かります。縦持ち・横持ちの両方で試してください。
           </p>
-          <div class="row"><button id="btn-record" class="primary">記録</button><button id="btn-undo">1件取り消し</button></div>
           <div id="rec-out" class="info small"></div>
         </div>
 
