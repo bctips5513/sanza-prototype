@@ -1,4 +1,4 @@
-import { basis, dirFromAzEl } from './camera';
+import { basis, dirFromAzEl, stepRange, type PoseWindow } from './camera';
 import { profileAlign } from './profileAlign';
 import { lineMatch } from './lineMatch';
 
@@ -48,6 +48,11 @@ export interface AutoAlignInput {
   useLine?: boolean;
   /** 空の境目への当てはめも使うか（既定 true） */
   useProfile?: boolean;
+  /** 仰角・傾きの探索範囲（センサーで分かっているとき）。省略時は仰角 −40〜25°・傾き ±8° */
+  pitchCenter?: number;
+  pitchRange?: number;
+  rollCenter?: number;
+  rollRange?: number;
   /** EXIF の撮影方位 [deg]。ここから大きく離れた答えは自動では適用しない（信頼度を「低」にする） */
   exifYaw?: number;
 }
@@ -252,14 +257,28 @@ export function autoAlign(inp: AutoAlignInput, onProgress?: (done: number, total
   // 粗い刻みは広い窓（±40px）で拾える程度
   const yawStep = Math.max(COARSE_MIN_STEP, Math.min(1.5, COARSE_STEP_PX / F0 / RAD));
   const pitchStep = yawStep;
-  const rolls = [-8, -4, 0, 4, 8];
+  const narrow = inp.pitchCenter !== undefined;
+  const poseWin: PoseWindow | undefined = narrow
+    ? {
+        yawCenter: inp.yawCenter,
+        yawRange: inp.yawRange,
+        pitchCenter: inp.pitchCenter!,
+        pitchRange: inp.pitchRange ?? 3,
+        rollCenter: inp.rollCenter ?? 0,
+        rollRange: inp.rollRange ?? 3,
+      }
+    : undefined;
+  // 範囲を絞るときも格子は全域と同じ点を使い、範囲内だけ残す
+  // （格子をずらすと、方位と焦点距離がつり合った数度隣の偽の答えに落ちる写真があった）
+  const rolls = [-8, -4, 0, 4, 8].filter((r) => !poseWin || Math.abs(r - poseWin.rollCenter) <= Math.max(poseWin.rollRange, 4));
+  const pitches = stepRange(-40, 25, pitchStep).filter((p) => !poseWin || Math.abs(p - poseWin.pitchCenter) <= poseWin.pitchRange + pitchStep);
   const nYaw = Math.ceil((2 * inp.yawRange) / yawStep) + (inp.yawRange >= 180 ? 0 : 1);
   const perYaw: AutoAlignCandidate[] = [];
   for (let iy = 0; iy < nYaw; iy++) {
     const yaw = inp.yawCenter - inp.yawRange + iy * yawStep;
     let best: AutoAlignCandidate = { yaw, pitch: 0, roll: 0, focalPx: F0, score: -Infinity };
     for (const roll of rolls)
-      for (let pitch = -40; pitch <= 25; pitch += pitchStep) {
+      for (const pitch of pitches) {
         const s = score(yaw, pitch, roll, F0, COARSE_WIN);
         if (s > best.score) best = { yaw, pitch, roll, focalPx: F0, score: s };
       }
@@ -270,8 +289,9 @@ export function autoAlign(inp: AutoAlignInput, onProgress?: (done: number, total
   const sorted = perYaw.filter((c) => c.score > -Infinity).sort((a, b) => b.score - a.score);
   const seeds: AutoAlignCandidate[] = [];
   for (const c of sorted) {
-    if (seeds.every((s) => Math.abs(angDiff(s.yaw, c.yaw)) > 5)) seeds.push(c);
-    if (seeds.length >= 8) break;
+    // 狭く探すとき（AR）は近い候補も残す（数度隣の偽の極大に正解が埋もれないように）
+    if (seeds.every((s) => Math.abs(angDiff(s.yaw, c.yaw)) > (narrow ? 1.5 : 5))) seeds.push(c);
+    if (seeds.length >= (narrow ? 12 : 8)) break;
   }
 
   // 2) 候補ごとに細かく詰める（焦点距離は EXIF 値の ±10%）
@@ -363,7 +383,7 @@ export function autoAlign(inp: AutoAlignInput, onProgress?: (done: number, total
   let finalConf = confidence;
   let finalCands = unique;
   if (inp.useProfile !== false) {
-    const pr = profileAlign({ rgba, width: w, height: h, focalPx: F0, skyline, azStep });
+    const pr = profileAlign({ rgba, width: w, height: h, focalPx: F0, skyline, azStep, win: poseWin });
     if (pr) {
       profileErr = pr.err;
       // 縮小画像（幅 800px 前後）で 5px 以下なら十分に当てはまっている
@@ -390,7 +410,7 @@ export function autoAlign(inp: AutoAlignInput, onProgress?: (done: number, total
 
   // 線の一致：まだ自信が持てないときだけ走らせる（形の一致で霞・雲・雪の写真を補う）
   if (inp.useLine !== false && finalConf !== 'high') {
-    const lm = lineMatch({ rgba, width: w, height: h, focalPx: F0, skyline, azStep });
+    const lm = lineMatch({ rgba, width: w, height: h, focalPx: F0, skyline, azStep, win: poseWin });
     const lb = lm[0];
     if (lb) {
       const lc: AutoAlignCandidate = { yaw: lb.yaw, pitch: lb.pitch, roll: lb.roll, focalPx: lb.focalPx, score: -lb.cost };

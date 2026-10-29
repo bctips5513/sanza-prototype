@@ -1,6 +1,8 @@
 export interface GestureHandlers {
   onPan?(dx: number, dy: number, x: number, y: number): void;
   onPinch?(scale: number, cx: number, cy: number, dx: number, dy: number): void;
+  /** 2本指のひねり [rad]（時計回りが正） */
+  onRotate?(dAngle: number): void;
   onTap?(x: number, y: number): void;
   onWheel?(deltaY: number, x: number, y: number, e: WheelEvent): void;
   onEnd?(): void;
@@ -47,6 +49,12 @@ export function attachGestures(el: HTMLElement, h: GestureHandlers): void {
       const c0 = { x: (prev.x + other.x) / 2, y: (prev.y + other.y) / 2 };
       const c1 = { x: (p.x + other.x) / 2, y: (p.y + other.y) / 2 };
       if (d0 > 0) h.onPinch?.(d1 / d0, c1.x, c1.y, c1.x - c0.x, c1.y - c0.y);
+      if (d0 > 20 && d1 > 20 && h.onRotate) {
+        let da = Math.atan2(p.y - other.y, p.x - other.x) - Math.atan2(prev.y - other.y, prev.x - other.x);
+        if (da > Math.PI) da -= 2 * Math.PI;
+        if (da < -Math.PI) da += 2 * Math.PI;
+        h.onRotate(da);
+      }
       pts.set(e.pointerId, p);
       moved = true;
     }

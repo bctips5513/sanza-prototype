@@ -105,3 +105,26 @@ export function focalPxFromHfov(hfov: number, width: number): number {
 export function angleBetween(a: Vec3, b: Vec3): number {
   return Math.atan2(Math.hypot(...cross(a, b)), dot(a, b));
 }
+
+/** 探索の範囲（中心 ± 幅）[deg]。センサーで向きが分かっているときに使う */
+export interface PoseWindow {
+  yawCenter: number;
+  yawRange: number;
+  pitchCenter: number;
+  pitchRange: number;
+  rollCenter: number;
+  rollRange: number;
+}
+
+/** 範囲 c ± r を step 刻みで（端を含む） */
+export function spanSteps(c: number, r: number, step: number): number[] {
+  const n = Math.max(1, Math.round((2 * r) / step));
+  return Array.from({ length: n + 1 }, (_, i) => c - r + (2 * r * i) / n);
+}
+
+/** a から b まで step 刻み（b を超えない。従来の for ループと同じ並び） */
+export function stepRange(a: number, b: number, step: number, inclusive = true): number[] {
+  const out: number[] = [];
+  for (let v = a; inclusive ? v <= b : v < b; v += step) out.push(v);
+  return out;
+}

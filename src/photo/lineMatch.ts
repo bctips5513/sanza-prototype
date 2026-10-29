@@ -1,4 +1,4 @@
-import { basis, dirFromAzEl } from './camera';
+import { basis, dirFromAzEl, spanSteps, stepRange, type PoseWindow } from './camera';
 
 /**
  * 線の一致：計算した稜線の形が、写真の中で横に続く境目の線に一貫して沿う姿勢を探す。
@@ -19,6 +19,8 @@ export interface LineMatchInput {
   focalPx: number;
   skyline: Float32Array;
   azStep: number;
+  /** 探索範囲（省略時は全周・仰角 −30〜25°・傾き ±6°） */
+  win?: PoseWindow;
 }
 
 export interface LineMatchCandidate {
@@ -119,12 +121,16 @@ export function lineMatch(inp: LineMatchInput): LineMatchCandidate[] {
 
   // 粗い総当たり
   const step = Math.max(0.3, Math.min(1.5, 5 / F0 / RAD));
+  const win = inp.win;
+  const yaws = win ? spanSteps(win.yawCenter, win.yawRange, step) : stepRange(0, 360, step, false);
+  const rolls = win ? spanSteps(win.rollCenter, win.rollRange, 3) : [-6, -3, 0, 3, 6];
+  const pitches = win ? spanSteps(win.pitchCenter, win.pitchRange, step) : stepRange(-30, 25, step);
   const perYaw: LineMatchCandidate[] = [];
-  for (let yaw = 0; yaw < 360; yaw += step) {
+  for (const yaw of yaws) {
     let b: LineMatchCandidate = { yaw, pitch: 0, roll: 0, focalPx: F0, cost: Infinity };
-    for (const roll of [-6, -3, 0, 3, 6])
+    for (const roll of rolls)
       for (const fs of [1, 1.05])
-        for (let pitch = -30; pitch <= 25; pitch += step) {
+        for (const pitch of pitches) {
           const v = cost(yaw, pitch, roll, F0 * fs, Dc, COARSE_CAP, 5);
           if (v < b.cost) b = { yaw, pitch, roll, focalPx: F0 * fs, cost: v };
         }

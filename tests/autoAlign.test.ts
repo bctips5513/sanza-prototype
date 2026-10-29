@@ -59,6 +59,29 @@ describe('自動合わせ', () => {
     expect(Math.abs(r.best!.roll - truth.roll)).toBeLessThan(0.6);
   }, 60_000);
 
+  it('センサーの向きの近く（方位±20°・仰角±3°・傾き±3°）だけを探しても復元する（AR用）', () => {
+    const truth: CameraParams = { yaw: 211.7, pitch: 1.4, roll: 0.8, focalPx: 620, width: 600, height: 800 };
+    const r = autoAlign({
+      rgba: render(truth),
+      width: 600,
+      height: 800,
+      focalPx: truth.focalPx * 1.04,
+      skyline,
+      azStep: AZ_STEP,
+      yawCenter: truth.yaw + 12,
+      yawRange: 20,
+      pitchCenter: truth.pitch - 1.1,
+      pitchRange: 3,
+      rollCenter: 0,
+      rollRange: 3,
+    });
+    expect(r.best).not.toBeNull();
+    expect(r.confidence).not.toBe('low');
+    expect(Math.abs(r.best!.yaw - truth.yaw)).toBeLessThan(0.3);
+    expect(Math.abs(r.best!.pitch - truth.pitch)).toBeLessThan(0.5);
+    expect(Math.abs(r.best!.focalPx / truth.focalPx - 1)).toBeLessThan(0.03);
+  }, 60_000);
+
   it('稜線のない画像（空だけ）は信頼度「低」', () => {
     const rgba = new Uint8ClampedArray(800 * 600 * 4).fill(200);
     const r = autoAlign({ rgba, width: 800, height: 600, focalPx: 560, skyline, azStep: AZ_STEP, yawCenter: 0, yawRange: 30 });

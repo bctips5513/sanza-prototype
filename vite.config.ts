@@ -29,7 +29,7 @@ export default defineConfig({
   plugins: [cspPlugin()],
   worker: { format: 'es' },
   build: {
-    rollupOptions: { input: { main: 'index.html', sensor: 'sensor.html' } },
+    rollupOptions: { input: { main: 'index.html', sensor: 'sensor.html', ar: 'ar.html' } },
   },
   test: {
     include: ['tests/**/*.test.ts'],

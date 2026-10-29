@@ -1,4 +1,4 @@
-import { basis, dirFromAzEl, project } from './camera';
+import { basis, dirFromAzEl, project, spanSteps, stepRange, type PoseWindow } from './camera';
 
 /**
  * 空の境目への当てはめ（雲のない空向け）
@@ -17,6 +17,8 @@ export interface ProfileInput {
   focalPx: number;
   skyline: Float32Array;
   azStep: number;
+  /** 探索範囲（省略時は全周・傾き ±6°。仰角は当てはめで決まる） */
+  win?: PoseWindow;
 }
 
 export interface ProfileResult {
@@ -102,10 +104,13 @@ export function profileAlign(inp: ProfileInput): ProfileResult | null {
   let best: ProfileResult | null = null;
   const yawStep = Math.max(0.2, Math.min(1, 3 / F0 / RAD));
   // 粗い総当たりは点の間隔を広げ、傾き・焦点距離も粗くして速くする（細かい調整は後段）
-  for (let yaw = 0; yaw < 360; yaw += yawStep)
-    for (let roll = -6; roll <= 6; roll += 3)
+  const win = inp.win;
+  const yaws = win ? spanSteps(win.yawCenter, win.yawRange, yawStep) : stepRange(0, 360, yawStep, false);
+  const rolls = win ? spanSteps(win.rollCenter, win.rollRange, 3) : [-6, -3, 0, 3, 6];
+  for (const yaw of yaws)
+    for (const roll of rolls)
       for (const fs of [1, 1.05]) {
-        const s = solve(yaw, roll, F0 * fs, 0, 6);
+        const s = solve(yaw, roll, F0 * fs, win?.pitchCenter ?? 0, 6);
         if (s && (!best || s.err < best.err)) best = { yaw, pitch: s.pitch, roll, focalPx: F0 * fs, err: s.err, coverage };
       }
   if (!best) return null;
