@@ -77,3 +77,39 @@ export function linearStats(v: number[]): { mean: number; std: number } {
   const m = v.reduce((a, b) => a + b, 0) / v.length;
   return { mean: m, std: Math.sqrt(v.reduce((a, b) => a + (b - m) ** 2, 0) / v.length) };
 }
+
+/**
+ * 持ち方（画面上端の向き）を重力から求める：0 = 縦持ち、90 = 端末の右側面が上（左に倒した横持ち）、180、270。
+ * screen.orientation は画面の回転が終わるまで更新されないため、記録の瞬間の持ち方はこちらで判定する。
+ * prev を渡すと、45° の境目付近で行ったり来たりしないよう 60° を超えるまで前の値を保つ。
+ */
+export function holdAngle(beta: number, gamma: number, prev?: number): number {
+  const b = beta * RAD;
+  const g = gamma * RAD;
+  // 地球の上方向を端末座標で表したもの（R の第3行）
+  const ux = -Math.cos(b) * Math.sin(g);
+  const uy = Math.sin(b);
+  let a = Math.atan2(ux, uy) / RAD;
+  if (a < 0) a += 360;
+  if (prev !== undefined && Math.abs(angDiff(a, prev)) < 60) return prev;
+  return (Math.round(a / 90) * 90) % 360;
+}
+
+/**
+ * iOS の webkitCompassHeading（磁北基準。縦持ちのときの背面カメラの向き）を持ち方に合わせて直す。
+ * 横持ちでは持ち方の角度だけずれる（実測：右側面が上の横持ちで −90°）。
+ */
+export function magneticHeading(compassRaw: number, hold: number): number {
+  return (((compassRaw + hold) % 360) + 360) % 360;
+}
+
+/**
+ * 日本付近の磁気偏角（西偏を正）[deg]。国土地理院の磁気図の近似式（2次式）。誤差は ±0.5° 程度。
+ * 真方位 = 磁方位 − 偏角。
+ */
+export function declinationJapan(lat: number, lon: number): number {
+  const dp = lat - 37;
+  const dl = lon - 138;
+  const min = 7 * 60 + 40.585 + 19.003 * dp - 6.265 * dl + 0.024 * dp * dp - 0.938 * dp * dl - 0.552 * dl * dl;
+  return min / 60;
+}

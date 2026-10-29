@@ -4,7 +4,7 @@ import L from 'leaflet';
 import './sensor.css';
 import { fetchPeaks, type Peak } from '../peaks/overpass';
 import { inverse } from '../geo/geodesic';
-import { angDiff, cameraAngles, circularStats, linearStats } from './orientation';
+import { angDiff, cameraAngles, circularStats, declinationJapan, holdAngle, linearStats, magneticHeading } from './orientation';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const fmt = (v: number | null | undefined, d = 1) => (v === null || v === undefined || !Number.isFinite(v) ? '—' : v.toFixed(d));
@@ -16,11 +16,15 @@ interface Sample {
   alpha: number | null;
   beta: number | null;
   gamma: number | null;
-  /** iOS Safari のみ：コンパス方位（北から時計回り） */
+  /** iOS Safari のみ：コンパス方位（磁北から時計回り。持ち方の補正済み） */
   compass: number | null;
+  /** webkitCompassHeading そのまま */
+  compassRaw: number | null;
   compassAcc: number | null;
   absolute: boolean;
   screenAngle: number;
+  /** 重力から求めた持ち方（0/90/180/270） */
+  hold: number;
 }
 
 let latest: Sample | null = null;
@@ -36,15 +40,19 @@ function screenAngle(): number {
 
 function onOrientation(e: DeviceOrientationEvent, absoluteEvent: boolean) {
   const anyE = e as DeviceOrientationEvent & { webkitCompassHeading?: number; webkitCompassAccuracy?: number };
+  const hold = e.beta !== null && e.gamma !== null ? holdAngle(e.beta, e.gamma, latest?.hold) : (latest?.hold ?? 0);
+  const raw = typeof anyE.webkitCompassHeading === 'number' ? anyE.webkitCompassHeading : null;
   const s: Sample = {
     t: performance.now(),
     alpha: e.alpha,
     beta: e.beta,
     gamma: e.gamma,
-    compass: typeof anyE.webkitCompassHeading === 'number' ? anyE.webkitCompassHeading : null,
+    compass: raw !== null ? magneticHeading(raw, hold) : null,
+    compassRaw: raw,
     compassAcc: typeof anyE.webkitCompassAccuracy === 'number' ? anyE.webkitCompassAccuracy : null,
     absolute: absoluteEvent || e.absolute,
     screenAngle: screenAngle(),
+    hold,
   };
   // 絶対方位のイベント（Android）と通常のイベントが両方来る場合は絶対方位を優先
   if (!absoluteEvent && latest?.absolute && s.t - latest.t < 200) return;
@@ -63,7 +71,7 @@ setInterval(() => {
 function current() {
   const s = latest;
   if (!s || s.beta === null || s.gamma === null) return null;
-  const cam = cameraAngles(s.alpha ?? 0, s.beta, s.gamma, s.screenAngle);
+  const cam = cameraAngles(s.alpha ?? 0, s.beta, s.gamma, s.hold);
   return { s, cam };
 }
 
@@ -171,6 +179,28 @@ function cameraLabel(): string {
   return sel.selectedOptions[0]?.textContent ?? '';
 }
 
+/** 現在地の磁気偏角（位置が分からなければ null） */
+function decl(): number | null {
+  return gps ? declinationJapan(gps.coords.latitude, gps.coords.longitude) : null;
+}
+/** 磁北基準 → 真北基準（偏角が分からなければそのまま） */
+function toTrue(mag: number): number {
+  const d = decl();
+  return d === null ? mag : (mag - d + 360) % 360;
+}
+/** 記録の持ち方。古い記録は画面の向きと傾きから推定する（画面の回転が遅れて縦のまま記録されたものがある） */
+function recHold(r: Rec): number {
+  if (r.hold !== undefined) return r.hold;
+  return Math.abs(r.roll) > 45 ? (r.roll < 0 ? 90 : 270) : r.screenAngle;
+}
+/** 記録のコンパス方位（真北基準）。古い記録は持ち方・偏角の補正前なので補正して返す */
+function recCompass(r: Rec): number | null {
+  if (r.compassTrue !== undefined) return r.compassTrue ?? r.compass;
+  if (r.compass === null) return null;
+  const mag = magneticHeading(r.compass, recHold(r));
+  return r.lat !== null && r.lon !== null ? (mag - declinationJapan(r.lat, r.lon) + 360) % 360 : mag;
+}
+
 // ---------------------------------------------------------------- 表示
 const chart = $('chart') as HTMLCanvasElement;
 
@@ -180,16 +210,16 @@ function loop() {
   if (c) {
     const { s, cam } = c;
     const target = targetAz();
-    const head = s.compass ?? cam.headingFromAlpha;
+    const head = s.compass !== null ? toTrue(s.compass) : cam.headingFromAlpha;
     hud.innerHTML =
-      `方位 <b>${fmt(head)}°</b>${s.compass !== null ? '（コンパス）' : s.absolute ? '（絶対alpha）' : '（相対alpha）'}` +
+      `方位 <b>${fmt(head)}°</b>${s.compass !== null ? (decl() !== null ? '（コンパス・真北）' : '（コンパス・磁北）') : s.absolute ? '（絶対alpha）' : '（相対alpha）'}` +
       (target !== null ? `　目標 ${fmt(target)}°　差 <b>${fmt(angDiff(head, target))}°</b>` : '') +
       `<br>仰角 ${fmt(cam.elev)}°　傾き ${fmt(cam.roll)}°　${rateHz} Hz` +
       (s.compassAcc !== null ? `　コンパス精度 ±${fmt(s.compassAcc, 0)}°` : '');
     $('raw').textContent =
       `alpha ${fmt(s.alpha, 2)}  beta ${fmt(s.beta, 2)}  gamma ${fmt(s.gamma, 2)}\n` +
-      `webkitCompassHeading ${fmt(s.compass, 2)}  webkitCompassAccuracy ${fmt(s.compassAcc, 1)}\n` +
-      `absolute ${s.absolute}  画面の向き ${s.screenAngle}°  更新 ${rateHz} Hz\n` +
+      `webkitCompassHeading ${fmt(s.compassRaw, 2)}  webkitCompassAccuracy ${fmt(s.compassAcc, 1)}\n` +
+      `absolute ${s.absolute}  画面の向き ${s.screenAngle}°  持ち方 ${s.hold}°  磁気偏角 ${fmt(decl(), 2)}°  更新 ${rateHz} Hz\n` +
       `alpha から求めたカメラ方位 ${fmt(cam.headingFromAlpha, 2)}°`;
   }
   const tn = targetName();
@@ -213,7 +243,7 @@ function drawChart() {
   if (history.length < 2) return;
   const now = history[history.length - 1].t;
   const series = history.map((s) => {
-    const cam = s.beta !== null && s.gamma !== null ? cameraAngles(s.alpha ?? 0, s.beta, s.gamma, s.screenAngle) : null;
+    const cam = s.beta !== null && s.gamma !== null ? cameraAngles(s.alpha ?? 0, s.beta, s.gamma, s.hold) : null;
     return { t: s.t, head: s.compass ?? cam?.headingFromAlpha ?? NaN, elev: cam?.elev ?? NaN };
   });
   // 方位は直近の平均を中心に ±10° を表示
@@ -255,7 +285,7 @@ $('btn-still').addEventListener('click', async () => {
   out.textContent = '計測中…（動かさないでください）';
   await new Promise((r) => setTimeout(r, 10_000));
   const xs = history.filter((s) => s.t >= t0);
-  const cams = xs.filter((s) => s.beta !== null && s.gamma !== null).map((s) => cameraAngles(s.alpha ?? 0, s.beta!, s.gamma!, s.screenAngle));
+  const cams = xs.filter((s) => s.beta !== null && s.gamma !== null).map((s) => cameraAngles(s.alpha ?? 0, s.beta!, s.gamma!, s.hold));
   const comp = xs.map((s) => s.compass).filter((v): v is number => v !== null);
   const head = circularStats(comp.length ? comp : cams.map((c) => c.headingFromAlpha));
   const el = linearStats(cams.map((c) => c.elev));
@@ -395,7 +425,13 @@ interface Rec {
   time: string;
   target: string;
   trueAz: number;
+  /** 磁北基準のコンパス方位（持ち方の補正済み） */
   compass: number | null;
+  /** 真北基準のコンパス方位（磁気偏角の補正済み） */
+  compassTrue?: number | null;
+  compassRaw?: number | null;
+  decl?: number | null;
+  hold?: number;
   compassAcc: number | null;
   alpha: number | null;
   beta: number | null;
@@ -503,13 +539,20 @@ function recordNow(excludeMs: number) {
   const now = performance.now();
   let recent = history.filter((s) => now - s.t >= excludeMs && now - s.t < excludeMs + 700 && s.beta !== null && s.gamma !== null);
   if (recent.length < 3) recent = history.filter((s) => c.s.t - s.t < 500 && s.beta !== null && s.gamma !== null);
-  const cams = recent.map((s) => cameraAngles(s.alpha ?? 0, s.beta!, s.gamma!, s.screenAngle));
+  const cams = recent.map((s) => cameraAngles(s.alpha ?? 0, s.beta!, s.gamma!, s.hold));
   const comp = recent.map((s) => s.compass).filter((v): v is number => v !== null);
+  const raws = recent.map((s) => s.compassRaw).filter((v): v is number => v !== null);
+  const compass = comp.length ? circularStats(comp).mean : null;
+  const d = decl();
   records.push({
     time: new Date().toISOString(),
     target: targetName(),
     trueAz: t,
-    compass: comp.length ? circularStats(comp).mean : null,
+    compass,
+    compassTrue: compass !== null && d !== null ? (compass - d + 360) % 360 : null,
+    compassRaw: raws.length ? circularStats(raws).mean : null,
+    decl: d,
+    hold: c.s.hold,
     compassAcc: c.s.compassAcc,
     alpha: c.s.alpha,
     beta: c.s.beta,
@@ -532,10 +575,11 @@ function recordNow(excludeMs: number) {
   save();
   renderRecords();
   const last = records[records.length - 1];
-  $('status').textContent = `記録 ${records.length} 件目：${last.target} 差 ${last.compass !== null ? fmt(angDiff(last.compass, last.trueAz)) : fmt(angDiff(last.headingFromAlpha, last.trueAz))}°`;
+  const lc = recCompass(last);
+  const err = lc !== null ? angDiff(lc, last.trueAz) : angDiff(last.headingFromAlpha, last.trueAz);
+  $('status').textContent = `記録 ${records.length} 件目：${last.target} 差 ${fmt(err)}°`;
   navigator.vibrate?.(30);
   // 全画面でも記録したことが分かるよう、映像の上にも一瞬表示
-  const err = last.compass !== null ? angDiff(last.compass, last.trueAz) : angDiff(last.headingFromAlpha, last.trueAz);
   flash(`✓ ${records.length}件目 差 ${fmt(err)}°`);
 }
 
@@ -551,7 +595,7 @@ function renderRecords() {
     out.textContent = '記録はまだありません';
     return;
   }
-  const errC = records.filter((r) => r.compass !== null).map((r) => angDiff(r.compass!, r.trueAz));
+  const errC = records.filter((r) => recCompass(r) !== null).map((r) => angDiff(recCompass(r)!, r.trueAz));
   const errA = records.map((r) => angDiff(r.headingFromAlpha, r.trueAz));
   const sc = linearStats(errC);
   const sa = linearStats(errA);
@@ -559,21 +603,21 @@ function renderRecords() {
     .slice(-12)
     .map(
       (r) =>
-        `<tr><td>${esc(r.target)}</td><td>${fmt(r.trueAz)}°</td><td>${r.compass !== null ? fmt(angDiff(r.compass, r.trueAz)) + '°' : '—'}</td><td>${fmt(angDiff(r.headingFromAlpha, r.trueAz))}°</td><td>${r.screenAngle === 0 ? '縦' : '横'}</td></tr>`,
+        `<tr><td>${esc(r.target)}</td><td>${fmt(r.trueAz)}°</td><td>${recCompass(r) !== null ? fmt(angDiff(recCompass(r)!, r.trueAz)) + '°' : '—'}</td><td>${fmt(angDiff(r.headingFromAlpha, r.trueAz))}°</td><td>${recHold(r) % 180 === 0 ? '縦' : '横'}</td></tr>`,
     )
     .join('');
   out.innerHTML =
     `記録 ${records.length} 件<br>` +
-    (errC.length ? `コンパス方位の誤差：平均 <b>${fmt(sc.mean)}°</b>・ばらつき ${fmt(sc.std)}°<br>` : '') +
+    (errC.length ? `コンパス方位の誤差（真北基準）：平均 <b>${fmt(sc.mean)}°</b>・ばらつき ${fmt(sc.std)}°<br>` : '') +
     `alpha から求めた方位の誤差：平均 ${fmt(sa.mean)}°・ばらつき ${fmt(sa.std)}°<br>` +
-    `<span class="small">（平均が −7〜−9° 前後に揃うなら磁北基準の可能性。ばらつきが小さければ、一度の補正で済む）</span>` +
+    `<span class="small">（コンパスは持ち方と磁気偏角を補正済み。alpha は iOS では起動ごとに基準が変わるため参考値）</span>` +
     `<table class="t"><tr><th>目標</th><th>真方位</th><th>コンパス誤差</th><th>alpha誤差</th><th>持ち方</th></tr>${rows}</table>`;
 }
 renderRecords();
 
 // ---------------------------------------------------------------- 3. 書き出し
 $('btn-csv').addEventListener('click', () => {
-  const keys: (keyof Rec)[] = ['time', 'target', 'trueAz', 'compass', 'compassAcc', 'alpha', 'beta', 'gamma', 'absolute', 'screenAngle', 'headingFromAlpha', 'elev', 'roll', 'lat', 'lon', 'gpsAcc', 'targetLat', 'targetLon', 'camera', 'zoom', 'zoomMode', 'ua'];
+  const keys: (keyof Rec)[] = ['time', 'target', 'trueAz', 'compass', 'compassTrue', 'compassRaw', 'decl', 'hold', 'compassAcc', 'alpha', 'beta', 'gamma', 'absolute', 'screenAngle', 'headingFromAlpha', 'elev', 'roll', 'lat', 'lon', 'gpsAcc', 'targetLat', 'targetLon', 'camera', 'zoom', 'zoomMode', 'ua'];
   const lines = [keys.join(',')];
   for (const r of records) lines.push(keys.map((k) => JSON.stringify(r[k] ?? '')).join(','));
   lines.push('', 'still_time,n,headStd,elevStd,rollStd');
