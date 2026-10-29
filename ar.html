@@ -46,11 +46,14 @@
       </div>
 
       <div id="more" class="ar-more hidden">
+        <button id="btn-autostart" class="ar-btn" aria-pressed="true">自動で合わせ始める：入</button>
+        <button id="btn-autofov" class="ar-btn" aria-pressed="true">画角・傾きの自動測定：入</button>
         <button id="btn-track" class="ar-btn" aria-pressed="true">追従補正：入</button>
         <button id="btn-reset" class="ar-btn">合わせを解除（コンパスに戻す）</button>
         <button id="btn-compute" class="ar-btn">現在地で稜線を計算し直す</button>
         <label class="ar-label">1× の35mm換算 [mm]<input id="in-f35" type="number" step="0.5" inputmode="decimal" /></label>
-        <button id="btn-fov-reset" class="ar-btn">このカメラの画角の調整を消す</button>
+        <button id="btn-fov-reset" class="ar-btn">このカメラ・ズームの画角の測定・調整を消す</button>
+        <div id="diag" class="small"></div>
         <a class="ar-btn" href="./">山座同定（写真）へ</a>
         <a class="ar-btn" href="./sensor.html">センサー検証へ</a>
         <button id="btn-more-close" class="ar-btn">閉じる</button>
@@ -61,7 +64,8 @@
         <p>カメラ映像に、計算した稜線と山名を重ねます。</p>
         <ol>
           <li>まずコンパスの向きで重ねます（±10°ほどずれます）</li>
-          <li>山が見えたら「自動合わせ」。映像の稜線に合わせて向きを直します</li>
+          <li>山の稜線が映る向きで少し止めると、自動で合わせます（うまくいかなければ「自動合わせ」）</li>
+          <li>合わせた後、左右にゆっくり向きを変えては少し止めると、画角と傾きも測って合わせます</li>
           <li>ずれていれば、指でなぞって手動で合わせます（1本指＝移動、2本指＝拡大・回転）</li>
           <li>合わせた後は、カメラを動かしてもジャイロで稜線が付いてきます</li>
         </ol>

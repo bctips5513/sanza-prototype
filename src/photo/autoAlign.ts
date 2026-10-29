@@ -53,6 +53,11 @@ export interface AutoAlignInput {
   pitchRange?: number;
   rollCenter?: number;
   rollRange?: number;
+  /**
+   * 焦点距離の不確かさ（±割合）。指定すると粗い総当たりでも焦点距離を振り、詰める範囲もこの幅にする
+   * （AR で画角がまだ測れていないとき。誤った画角のままだと、狭い画角で数度隣の偽の答えが「高」になることがある）
+   */
+  focalRange?: number;
   /** EXIF の撮影方位 [deg]。ここから大きく離れた答えは自動では適用しない（信頼度を「低」にする） */
   exifYaw?: number;
 }
@@ -101,10 +106,23 @@ export function angDiff(a: number, b: number): number {
   return ((a - b + 540) % 360) - 180;
 }
 
-export function autoAlign(inp: AutoAlignInput, onProgress?: (done: number, total: number) => void): AutoAlignResult {
-  const t0 = performance.now();
+export type ScorerInput = Pick<AutoAlignInput, 'rgba' | 'width' | 'height' | 'skyline' | 'azStep' | 'weights' | 'upMode' | 'trim' | 'skyModel'>;
+
+export interface Scorer {
+  /** 姿勢と焦点距離 [px] での得点（稜線の上が空らしく下が山らしいほど大きい）。点が少なすぎれば −Infinity */
+  score: (yaw: number, pitch: number, roll: number, F: number, win: number) => number;
+  /** 画素ごとのきめ */
+  T: Float32Array;
+  /** 稜線の方向ベクトル（方位 i·azStep） */
+  dirs: Float32Array;
+}
+
+/** 粗い探索・細かい詰めで使う、稜線の上下を比べる窓の高さ [px] */
+export const SCORE_WIN = { coarse: COARSE_WIN, fine: FINE_WIN } as const;
+
+/** 画像の特徴量を求め、姿勢の得点を返す関数を作る（自動合わせ・AR の画角合わせで共通） */
+export function makeScorer(inp: ScorerInput): Scorer {
   const { rgba, width: w, height: h, skyline, azStep } = inp;
-  const F0 = inp.focalPx;
   const wts = inp.weights ?? DEFAULT_WEIGHTS;
   const nAz = skyline.length;
   const n = w * h;
@@ -252,6 +270,17 @@ export function autoAlign(inp: AutoAlignInput, onProgress?: (done: number, total
     }
     return s / cnt;
   };
+  return { score, T, dirs };
+}
+
+export function autoAlign(inp: AutoAlignInput, onProgress?: (done: number, total: number) => void): AutoAlignResult {
+  const t0 = performance.now();
+  const { rgba, width: w, height: h, skyline, azStep } = inp;
+  const F0 = inp.focalPx;
+  const nAz = skyline.length;
+  const cx = w / 2;
+  const cy = h / 2;
+  const { score, T, dirs } = makeScorer(inp);
 
   // 1) 粗い総当たり
   // 粗い刻みは広い窓（±40px）で拾える程度
@@ -274,14 +303,17 @@ export function autoAlign(inp: AutoAlignInput, onProgress?: (done: number, total
   const pitches = stepRange(-40, 25, pitchStep).filter((p) => !poseWin || Math.abs(p - poseWin.pitchCenter) <= poseWin.pitchRange + pitchStep);
   const nYaw = Math.ceil((2 * inp.yawRange) / yawStep) + (inp.yawRange >= 180 ? 0 : 1);
   const perYaw: AutoAlignCandidate[] = [];
+  const fr = inp.focalRange ?? 0;
+  const fScales = fr > 0 ? stepRange(-fr, fr + 1e-9, Math.max(0.06, fr / 3)).map((d) => 1 + d) : [1];
   for (let iy = 0; iy < nYaw; iy++) {
     const yaw = inp.yawCenter - inp.yawRange + iy * yawStep;
     let best: AutoAlignCandidate = { yaw, pitch: 0, roll: 0, focalPx: F0, score: -Infinity };
-    for (const roll of rolls)
-      for (const pitch of pitches) {
-        const s = score(yaw, pitch, roll, F0, COARSE_WIN);
-        if (s > best.score) best = { yaw, pitch, roll, focalPx: F0, score: s };
-      }
+    for (const fs of fScales)
+      for (const roll of rolls)
+        for (const pitch of pitches) {
+          const s = score(yaw, pitch, roll, F0 * fs, COARSE_WIN);
+          if (s > best.score) best = { yaw, pitch, roll, focalPx: F0 * fs, score: s };
+        }
     perYaw.push(best);
     if (onProgress && iy % 20 === 0) onProgress(iy, nYaw);
   }
@@ -295,12 +327,12 @@ export function autoAlign(inp: AutoAlignInput, onProgress?: (done: number, total
   }
 
   // 2) 候補ごとに細かく詰める（焦点距離は EXIF 値の ±10%）
-  const fMin = F0 * 0.9;
-  const fMax = F0 * 1.1;
+  const fMin = F0 * (1 - Math.max(0.1, fr));
+  const fMax = F0 * (1 + Math.max(0.1, fr));
   const refineFocal = inp.refineFocal !== false;
   const refined = seeds.map((c0) => {
     let { yaw, pitch, roll } = c0;
-    let F = F0;
+    let F = c0.focalPx;
     let bs = score(yaw, pitch, roll, F, FINE_WIN);
     for (const st of [1, 0.5, 0.2, 0.1, 0.05])
       for (let it = 0; it < 60; it++) {
@@ -383,7 +415,7 @@ export function autoAlign(inp: AutoAlignInput, onProgress?: (done: number, total
   let finalConf = confidence;
   let finalCands = unique;
   if (inp.useProfile !== false) {
-    const pr = profileAlign({ rgba, width: w, height: h, focalPx: F0, skyline, azStep, win: poseWin });
+    const pr = profileAlign({ rgba, width: w, height: h, focalPx: fr > 0 && best ? best.focalPx : F0, skyline, azStep, win: poseWin });
     if (pr) {
       profileErr = pr.err;
       // 縮小画像（幅 800px 前後）で 5px 以下なら十分に当てはまっている
@@ -410,7 +442,7 @@ export function autoAlign(inp: AutoAlignInput, onProgress?: (done: number, total
 
   // 線の一致：まだ自信が持てないときだけ走らせる（形の一致で霞・雲・雪の写真を補う）
   if (inp.useLine !== false && finalConf !== 'high') {
-    const lm = lineMatch({ rgba, width: w, height: h, focalPx: F0, skyline, azStep, win: poseWin });
+    const lm = lineMatch({ rgba, width: w, height: h, focalPx: fr > 0 && best ? best.focalPx : F0, skyline, azStep, win: poseWin });
     const lb = lm[0];
     if (lb) {
       const lc: AutoAlignCandidate = { yaw: lb.yaw, pitch: lb.pitch, roll: lb.roll, focalPx: lb.focalPx, score: -lb.cost };

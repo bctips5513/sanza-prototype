@@ -7,6 +7,8 @@ import { loadSettings } from '../settings';
 import { inverse } from '../geo/geodesic';
 import { basis, dirFromAzEl, project, type Basis, type CameraParams } from '../photo/camera';
 import { runAutoAlignSource, cancelAutoAlign } from '../photo/autoAlignClient';
+import { CALIB_MIN_SPREAD } from './calibrate';
+import { cancelCalibrate, runCalibrate } from './calibrateClient';
 import type { AutoAlignCandidate } from '../photo/autoAlign';
 import { attachGestures, fitCanvas } from '../ui/gestures';
 import { bandLine, drawLabels, layoutLabels, type LabelItem } from '../ui/labels';
@@ -41,9 +43,15 @@ interface Store {
   /** 持ち方ごとの仰角・傾きのくせ */
   bias: Record<string, { dPitch: number; dRoll: number }>;
   autoTrack: boolean;
+  /** 止めて山に向けると自動で合わせ始める */
+  autoStart: boolean;
+  /** 向きを変えた数コマから画角・傾きを測る */
+  autoFov: boolean;
+  /** カメラ・ズームごとの画角の測定値（直近 5 回。中央値を使う） */
+  fovHist: Record<string, number[]>;
 }
 const STORE_KEY = 'sanza.ar.v1';
-const store: Store = { f35: 26, fov: {}, bias: {}, autoTrack: true };
+const store: Store = { f35: 26, fov: {}, bias: {}, autoTrack: true, autoStart: true, autoFov: true, fovHist: {} };
 try {
   Object.assign(store, JSON.parse(localStorage.getItem(STORE_KEY) ?? '{}'));
 } catch {
@@ -109,6 +117,7 @@ function onOrientation(e: DeviceOrientationEvent) {
     if (j !== null) {
       corr.yawOff = wrap360(corr.yawOff - j);
       if (compassOff !== null) compassOff = wrap360(compassOff - j);
+      resetKeyframes();
       if (mode === 'locked') toast('向きの基準の飛びを補正しました');
     }
   }
@@ -154,6 +163,8 @@ function lock(label: string) {
 function unlock() {
   mode = 'compass';
   alignLabel = '';
+  pendingAuto = null;
+  resetKeyframes();
   const b = biasFor(latest?.hold ?? 0);
   corr = { yawOff: compassOff ?? 0, ...b };
 }
@@ -163,6 +174,7 @@ document.addEventListener('visibilitychange', () => {
   // 画面を離れると alpha の基準が変わることがある。合わせ済みならコンパスとの差を保って推定し直す
   compassOff = null;
   compassOffAlpha = 0.2;
+  resetKeyframes();
   setTimeout(() => {
     compassOffAlpha = 0.05;
     if (mode === 'locked' && compassOff !== null) {
@@ -248,16 +260,9 @@ const devQuery = import.meta.env.DEV ? new URLSearchParams(location.search) : nu
 
 async function startCamera(deviceId?: string) {
   stream?.getTracks().forEach((t) => t.stop());
-  if (devQuery?.get('fake')) {
-    const img = new Image();
-    img.src = devQuery.get('fake')!;
-    await new Promise((r) => (img.onload = r));
-    const c = document.createElement('canvas');
-    c.width = img.naturalWidth;
-    c.height = img.naturalHeight;
-    c.getContext('2d')!.drawImage(img, 0, 0);
-    stream = c.captureStream(5);
-    setInterval(() => c.getContext('2d')!.drawImage(img, 0, 0), 200);
+  if (import.meta.env.DEV && devQuery?.get('fake')) {
+    const { fakeStream } = await import('./devFake');
+    stream = await fakeStream(devQuery, (bias) => (latest ? applyCorrection(sensorPose(latest), { yawOff: bias.yaw, dPitch: bias.pitch, dRoll: bias.roll }) : null));
     video.srcObject = stream;
     return;
   }
@@ -480,9 +485,14 @@ function renderHud() {
         (acc !== null && acc !== undefined ? `　コンパス精度 ±${fmt(acc, 0)}°` : '') +
         (acc !== null && acc !== undefined && (acc < 0 || acc >= 30) ? '　<span class="warn">8の字に振って調整を</span>' : ''),
     );
+    if (store.autoStart && result && !frozen) parts.push(esc(autoInfo || '山の稜線が映る向きで少し止めると、自動で合わせます'));
   } else {
     const drift = compassOff !== null ? angDiff(corr.yawOff, compassOff) : null;
     parts.push(`<span class="ok">合わせ済み（${esc(alignLabel)}）</span>` + (drift !== null ? `　コンパスとの差 ${fmt(drift)}°` : '') + (trackInfo ? `　${esc(trackInfo)}` : ''));
+    if (store.autoFov && !frozen) {
+      const n = store.fovHist[fovKey()]?.length ?? 0;
+      parts.push(esc(calibInfo || (n ? `画角は測定済み（${n}回）` : '画角を測るため、左右にゆっくり向きを変えては少し止めてください')));
+    }
   }
   if (frozen) parts.push('<span class="warn">画面を止めています。指で稜線を合わせ、「ライブに戻る」</span>');
   if (status) parts.push(esc(status));
@@ -495,17 +505,25 @@ function renderHud() {
 function loop() {
   draw();
   renderHud();
+  maybeAutoStart();
   maybeTrack();
   requestAnimationFrame(loop);
 }
 
 // ---------------------------------------------------------------- 手動合わせ
+/** 手で画角を変えたら、それまでの測定値は捨てて手の値から測り直す */
+function setManualFov(fov: number) {
+  store.fov[fovKey()] = fov;
+  delete store.fovHist[fovKey()];
+  calibInfo = '';
+}
+
 function nudge(kind: string, v: number) {
   if (!view) return;
   if (kind === 'yaw') corr.yawOff = wrap360(corr.yawOff - v);
   else if (kind === 'pitch') corr.dPitch -= v;
   else if (kind === 'roll') corr.dRoll += v;
-  else if (kind === 'fov') store.fov[fovKey()] = videoFov() * (1 + v / 100);
+  else if (kind === 'fov') setManualFov(videoFov() * (1 + v / 100));
   lock('手動');
 }
 
@@ -524,8 +542,7 @@ attachGestures(overlay, {
   },
   onPinch(scale) {
     if (!view || !Number.isFinite(scale) || scale <= 0) return;
-    const f = view.focalVideo * scale;
-    store.fov[fovKey()] = longFovFromFocal(f, view.vw, view.vh);
+    setManualFov(longFovFromFocal(view.focalVideo * scale, view.vw, view.vh));
     mode = 'locked';
     alignLabel = '手動';
   },
@@ -561,7 +578,15 @@ function candPose(c: AutoAlignCandidate): Pose {
   return { yaw: c.yaw, pitch: c.pitch, roll: c.roll };
 }
 
+/** 画角がまだ測れていなければ、自動合わせで振った焦点距離を仮の画角として使う（測定値には数えない） */
+function adoptCandFocal(c: AutoAlignCandidate, f: Frozen) {
+  if (store.fovHist[fovKey()]?.length) return;
+  store.fov[fovKey()] = longFovFromFocal(c.focalPx, f.vw, f.vh);
+  saveStore();
+}
+
 function applyCandidate(c: AutoAlignCandidate, f: Frozen, label: string) {
+  adoptCandFocal(c, f);
   corr = correctionFrom(candPose(c), f.sensor);
   lock(label);
 }
@@ -586,9 +611,10 @@ $('btn-auto').addEventListener('click', async () => {
   btn.disabled = true;
   const prior = applyCorrection(f.sensor, corr);
   // 合わせ済みなら狭く、コンパス任せなら広く探す（実測のコンパス誤差は多くが ±10°、まれに 18°）
-  const yawRange = mode === 'locked' ? 10 : 20;
-  // 画角は求めない：実写真の映像で試すと、画角を動かすと傾きとつり合って誤った値に寄ることがあり、
-  // 公称値（またはピンチで合わせて記憶した値）のまま方位・仰角・傾きだけ求めるほうが正確だった
+  // 画角は求めない：1コマでは画角を動かすと傾きとつり合って誤った値に寄ることがあるため、
+  // 公称値（または測定・手で合わせて記憶した値）のまま方位・仰角・傾きだけ求める。画角は第2段階で数コマから測る
+  const opts = alignOpts(prior);
+  const yawRange = opts.yawRange;
   try {
     const res = await runAutoAlignSource(
       f.canvas,
@@ -597,7 +623,7 @@ $('btn-auto').addEventListener('click', async () => {
       focalFromLongFov(videoFov(), f.vw, f.vh),
       skylineArr(),
       result.azStep,
-      { yawCenter: prior.yaw, yawRange, pitchCenter: prior.pitch, pitchRange: 3, rollCenter: prior.roll, rollRange: 3, refineFocal: false },
+      opts,
       (d, t) => (btn.textContent = `合わせ中 ${Math.round((d / t) * 100)}%`),
     );
     const best = res.best;
@@ -610,6 +636,7 @@ $('btn-auto').addEventListener('click', async () => {
       (res.confidence === 'high' || (res.confidence === 'medium' && Math.abs(best.pitch - prior.pitch) <= 2));
     if (best && ok) {
       applyCandidate(best, f, `自動・信頼度${conf}`);
+      addKeyframe(f);
       toast(`合わせました（信頼度 ${conf}）。ずれていれば指で直して「ライブに戻る」`, 2500);
     } else showCands(res.candidates.slice(0, 3), f);
   } catch (e) {
@@ -651,16 +678,104 @@ function hideCands() {
 }
 
 /**
+ * 自動合わせ（ボタン・自動で始まる合わせ）の探し方。コンパス任せなら広く、合わせ済みなら狭く。
+ * 画角がまだ測れていないカメラ・ズームでは焦点距離も ±25% 振る（公称値が大きくずれていると、
+ * 狭い画角で数度隣の偽の答えが「高」になりやすいため。tests/photos で偽の「高」は同程度、正しい「高」は約2倍）。
+ * 画角は使わない（1コマの画角は不確か。測るのは第2段階）。
+ */
+function alignOpts(prior: Pose) {
+  const unmeasured = !store.fovHist[fovKey()]?.length;
+  return {
+    yawCenter: prior.yaw,
+    yawRange: mode === 'locked' ? 10 : 20,
+    pitchCenter: prior.pitch,
+    pitchRange: 3,
+    rollCenter: prior.roll,
+    rollRange: 3,
+    refineFocal: unmeasured,
+    focalRange: unmeasured ? 0.25 : 0,
+  };
+}
+
+/** 画面中央の方位の稜線が、画面の縦の範囲に入っているか */
+function skylineInView(v: View): boolean {
+  const arr = skylineArr();
+  const i = Math.round(wrap360(v.pose.yaw) / result!.azStep) % arr.length;
+  const half = Math.atan(v.cam.height / 2 / v.cam.focalPx) / RAD;
+  return Math.abs(arr[i] - v.pose.pitch) < half + 1;
+}
+
+/**
+ * 自動で始まる合わせ：コンパスで表示中に、稜線が映る向きで止まったら裏で自動合わせを走らせる（画面は止めない）。
+ * 誤った答えを使うのが一番困るので、信頼度「高」の答えが2回続けて同じ補正になったときだけ使う。
+ */
+let lastAuto = 0;
+let pendingAuto: { c: Correction; t: number; focalPx: number } | null = null;
+let autoInfo = '';
+
+function maybeAutoStart() {
+  if (!store.autoStart || mode !== 'compass' || frozen || autoBusy || trackBusy || !result || !latest || !view) return;
+  const now = performance.now();
+  if (now - lastAuto < 1200 || !isSteady(hist, now, 700, 0.3)) return;
+  if (!skylineInView(view)) {
+    autoInfo = '稜線が画面に入る向きに向けてください';
+    return;
+  }
+  const f = grabFrame();
+  if (!f) return;
+  lastAuto = now;
+  trackBusy = true;
+  const seq = ++trackSeq;
+  const prior = applyCorrection(f.sensor, corr);
+  const opts = alignOpts(prior);
+  if (!pendingAuto) autoInfo = '自動で合わせています…（そのまま止めてください）';
+  runAutoAlignSource(f.canvas, f.vw, f.vh, focalFromLongFov(videoFov(), f.vw, f.vh), skylineArr(), result.azStep, opts)
+    .then((res) => {
+      if (seq !== trackSeq || mode !== 'compass') return;
+      const best = res.best;
+      // 自動で使うのは「高」で、センサーの仰角から 1.5° 以内、コンパスから 15° 以内の答えだけ
+      // （実写真から作った狭い画角の映像で、偽の「高」の多くは仰角が 2〜3° ずれるか、コンパスから大きく離れていた）
+      if (!best || res.confidence !== 'high' || Math.abs(angDiff(best.yaw, prior.yaw)) > 15 || Math.abs(best.pitch - prior.pitch) > 1.5) {
+        autoInfo = '自動合わせ：稜線を探しています（見つからなければ「自動合わせ」か指で）';
+        return;
+      }
+      const c = correctionFrom(candPose(best), f.sensor);
+      const p = pendingAuto;
+      const t = performance.now();
+      if (p && t - p.t < 10_000 && Math.abs(best.focalPx / p.focalPx - 1) < 0.05 && Math.abs(angDiff(c.yawOff, p.c.yawOff)) < 0.6 && Math.abs(c.dPitch - p.c.dPitch) < 0.4 && Math.abs(c.dRoll - p.c.dRoll) < 1) {
+        corr = { yawOff: wrap360(p.c.yawOff + angDiff(c.yawOff, p.c.yawOff) / 2), dPitch: (c.dPitch + p.c.dPitch) / 2, dRoll: (c.dRoll + p.c.dRoll) / 2 };
+        pendingAuto = null;
+        autoInfo = '';
+        adoptCandFocal(best, f);
+        lock('自動');
+        lastTrack = t;
+        toast('自動で合わせました。ずれていれば指で直せます', 2200);
+        addKeyframe(f);
+      } else {
+        pendingAuto = { c, t, focalPx: best.focalPx };
+        autoInfo = '自動合わせ：確かめています…（そのまま止めてください）';
+      }
+    })
+    .catch(() => {})
+    .finally(() => {
+      if (seq === trackSeq) trackBusy = false;
+    });
+}
+
+/**
  * 追従補正：合わせた後、カメラが止まっている間に映像のコマで狭く（±2°）合わせ直し、
- * ジャイロのずれを少しずつ直す。自信が高く、ずれが小さいときだけ半分ずつ反映する。
+ * ジャイロのずれを少しずつ直す。自信が高く、ずれが小さいときだけ方位・仰角を半分ずつ反映する。
+ * 同じコマを画角の測定（第2段階）にも使う。
  */
 function maybeTrack(force = false) {
-  if (!store.autoTrack || mode !== 'locked' || frozen || autoBusy || trackBusy || !result || !latest) return;
+  if ((!store.autoTrack && !store.autoFov) || mode !== 'locked' || frozen || autoBusy || trackBusy || !result || !latest) return;
   const now = performance.now();
   if (!force && (now - lastTrack < 2500 || !isSteady(hist, now, 600, 0.15))) return;
   const f = grabFrame();
   if (!f) return;
   lastTrack = now;
+  if (view && skylineInView(view)) addKeyframe(f);
+  if (!store.autoTrack) return;
   trackBusy = true;
   const seq = ++trackSeq;
   const prior = applyCorrection(f.sensor, corr);
@@ -698,12 +813,130 @@ function maybeTrack(force = false) {
         trackInfo = '追従補正：見送り（差が大きい）';
         return;
       }
-      corr = { yawOff: wrap360(corr.yawOff + dy * 0.5), dPitch: corr.dPitch + dp * 0.5, dRoll: corr.dRoll + dr * 0.5 };
+      // 傾きは直さない（1コマでは画角とつり合ってずれやすい。傾きは第2段階で数コマから求める）
+      corr = { yawOff: wrap360(corr.yawOff + dy * 0.5), dPitch: corr.dPitch + dp * 0.5, dRoll: corr.dRoll };
       trackInfo = `追従補正 ${dy >= 0 ? '+' : ''}${fmt(dy, 2)}°`;
     })
     .catch(() => {})
     .finally(() => {
       if (seq === trackSeq) trackBusy = false;
+    });
+}
+
+// ---------------------------------------------------------------- 画角・傾きの測定（第2段階）
+// 向きを変えて止めたときのコマ（縮小）をためておき、2コマ以上で向きの差が十分あれば、
+// 全コマ共通の補正と焦点距離を同時に求める（src/ar/calibrate.ts）。
+const KF_WIDTH = 480;
+const KF_MAX = 4;
+interface KeyFrame {
+  rgba: Uint8ClampedArray;
+  width: number;
+  height: number;
+  sensor: SensorPose;
+  /** 元のコマの大きさ */
+  vw: number;
+  vh: number;
+}
+let keyframes: KeyFrame[] = [];
+let kfKey = '';
+let calibDirty = false;
+let calibBusy = false;
+let calibSeq = 0;
+let calibInfo = '';
+
+function resetKeyframes() {
+  keyframes = [];
+  calibDirty = false;
+  calibSeq++;
+  cancelCalibrate();
+  calibBusy = false;
+}
+
+/** コマの横の画角 [deg] */
+function frameHfov(vw: number, vh: number): number {
+  return (2 * Math.atan(vw / 2 / focalFromLongFov(videoFov(), vw, vh))) / RAD;
+}
+
+function addKeyframe(f: Frozen) {
+  if (!store.autoFov || mode !== 'locked') return;
+  const key = `${fovKey()}|${latest?.hold ?? 0}|${f.vw}x${f.vh}`;
+  if (key !== kfKey) {
+    resetKeyframes();
+    kfKey = key;
+  }
+  const hf = frameHfov(f.vw, f.vh);
+  // 向きがほぼ同じコマは新しいほうに入れ替える（向きの広がりは増えない）
+  const near = keyframes.findIndex((k) => Math.abs(angDiff(k.sensor.yaw, f.sensor.yaw)) < hf * 0.15 && Math.abs(k.sensor.pitch - f.sensor.pitch) < hf * 0.15);
+  const w = KF_WIDTH;
+  const h = Math.round((f.vh * w) / f.vw);
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const g = c.getContext('2d', { willReadFrequently: true })!;
+  g.drawImage(f.canvas, 0, 0, w, h);
+  const kf: KeyFrame = { rgba: g.getImageData(0, 0, w, h).data, width: w, height: h, sensor: f.sensor, vw: f.vw, vh: f.vh };
+  if (near >= 0) keyframes[near] = kf;
+  else {
+    keyframes.push(kf);
+    if (keyframes.length > KF_MAX) keyframes.shift();
+    calibDirty = true;
+  }
+  maybeCalibrate();
+}
+
+function keyframeSpread(): number {
+  let d = 0;
+  for (const a of keyframes) for (const b of keyframes) d = Math.max(d, Math.abs(angDiff(a.sensor.yaw, b.sensor.yaw)));
+  return d;
+}
+
+function maybeCalibrate() {
+  if (calibBusy || !calibDirty || keyframes.length < 2 || !result || mode !== 'locked') return;
+  const k0 = keyframes[0];
+  const hf = frameHfov(k0.vw, k0.vh);
+  if (keyframeSpread() < hf * CALIB_MIN_SPREAD) {
+    calibInfo = `画角の測定：もう少し左右に向きを変えてください（${keyframes.length}コマ）`;
+    return;
+  }
+  calibDirty = false;
+  calibBusy = true;
+  calibInfo = `画角を測定中…（${keyframes.length}コマ）`;
+  const seq = ++calibSeq;
+  const fk = fovKey();
+  const fovBefore = videoFov();
+  const focalPx = focalFromLongFov(fovBefore, k0.vw, k0.vh) * (k0.width / k0.vw);
+  runCalibrate({
+    frames: keyframes.map(({ rgba, width, height, sensor }) => ({ rgba, width, height, sensor })),
+    focalPx,
+    skyline: skylineArr().slice(),
+    azStep: result.azStep,
+    corr: { ...corr },
+  })
+    .then((r) => {
+      if (seq !== calibSeq || mode !== 'locked' || fovKey() !== fk) return;
+      if (!r.ok) {
+        calibInfo = `画角の測定：はっきりしないため見送り（${keyframes.length}コマ）`;
+        return;
+      }
+      const measured = longFovFromFocal(r.focalPx, k0.width, k0.height);
+      const hist = (store.fovHist[fk] ??= []);
+      hist.push(measured);
+      if (hist.length > 5) hist.shift();
+      const med = [...hist].sort((a, b) => a - b)[hist.length >> 1];
+      store.fov[fk] = med;
+      // 測った画角に合わせて、方位・仰角・傾きの補正も一緒に求めた値にする
+      corr = r.corr;
+      lock(alignLabel || '自動');
+      const pct = (med / fovBefore - 1) * 100;
+      calibInfo = `画角を測定しました（${hist.length}回目、今回 ${pct >= 0 ? '+' : ''}${fmt(pct)}%）`;
+      if (Math.abs(pct) >= 1) toast(`画角を合わせました（${pct >= 0 ? '+' : ''}${fmt(pct)}%）`);
+    })
+    .catch(() => {})
+    .finally(() => {
+      if (seq === calibSeq) {
+        calibBusy = false;
+        maybeCalibrate();
+      }
     });
 }
 
@@ -731,22 +964,49 @@ $('btn-fine').addEventListener('click', () => {
 });
 $('btn-fine-close').addEventListener('click', () => $('fine').classList.add('hidden'));
 $('btn-more').addEventListener('click', () => {
+  renderDiag();
   $('more').classList.toggle('hidden');
   $('fine').classList.add('hidden');
 });
 $('btn-more-close').addEventListener('click', () => $('more').classList.add('hidden'));
 
-function renderTrackBtn() {
-  $('btn-track').setAttribute('aria-pressed', String(store.autoTrack));
-  $('btn-track').textContent = `追従補正：${store.autoTrack ? '入' : '切'}`;
+type Toggle = 'autoTrack' | 'autoStart' | 'autoFov';
+const toggles: [string, Toggle, string][] = [
+  ['btn-track', 'autoTrack', '追従補正'],
+  ['btn-autostart', 'autoStart', '自動で合わせ始める'],
+  ['btn-autofov', 'autoFov', '画角・傾きの自動測定'],
+];
+for (const [id, k, label] of toggles) {
+  const render = () => {
+    $(id).setAttribute('aria-pressed', String(store[k]));
+    $(id).textContent = `${label}：${store[k] ? '入' : '切'}`;
+  };
+  render();
+  $(id).addEventListener('click', () => {
+    store[k] = !store[k];
+    saveStore();
+    render();
+    trackInfo = '';
+    autoInfo = '';
+    calibInfo = '';
+    if (k === 'autoFov' && !store.autoFov) resetKeyframes();
+  });
 }
-renderTrackBtn();
-$('btn-track').addEventListener('click', () => {
-  store.autoTrack = !store.autoTrack;
-  saveStore();
-  renderTrackBtn();
-  trackInfo = '';
-});
+
+/** 画角がずれる原因を調べるための表示（カメラの設定・ズームの方式） */
+function renderDiag() {
+  const track = stream?.getVideoTracks()[0];
+  const st = (track?.getSettings?.() ?? {}) as MediaTrackSettings & { zoom?: number };
+  const caps = (track?.getCapabilities?.() ?? {}) as MediaTrackCapabilities & { zoom?: { min: number; max: number } };
+  const hist = store.fovHist[fovKey()] ?? [];
+  const nominal = hfovFrom35mm(store.f35 * (hwZoom ? zoom : 1));
+  $('diag').innerHTML = [
+    `カメラ：${esc(cameraLabel())}　映像 ${video.videoWidth}×${video.videoHeight}`,
+    `ズーム：${zoom}× ${hwZoom ? `カメラ側（設定値 ${st.zoom ?? '?'}、範囲 ${caps.zoom ? `${caps.zoom.min}〜${caps.zoom.max}` : '?'}）` : '画面の拡大'}`,
+    `画角（長辺）：${fmt(videoFov(), 2)}°　公称 ${fmt(nominal, 2)}°（${fmt((videoFov() / nominal - 1) * 100)}%）`,
+    `測定：${hist.length ? hist.map((v) => fmt(v, 2)).join(' / ') : 'なし'}`,
+  ].join('<br>');
+}
 $('btn-reset').addEventListener('click', () => {
   unlock();
   trackInfo = '';
@@ -768,7 +1028,11 @@ inF35.addEventListener('change', () => {
 });
 $('btn-fov-reset').addEventListener('click', () => {
   delete store.fov[fovKey()];
+  delete store.fovHist[fovKey()];
+  resetKeyframes();
+  calibInfo = '';
   saveStore();
+  renderDiag();
   toast('このカメラ・ズームの画角を初期値に戻しました');
 });
 document.querySelectorAll<HTMLButtonElement>('[data-zoom]').forEach((b) =>
@@ -836,4 +1100,4 @@ $('btn-start').addEventListener('click', async () => {
   requestAnimationFrame(loop);
 });
 
-if (import.meta.env.DEV) (window as unknown as { __ar: unknown }).__ar = { get corr() { return corr; }, set corr(c: Correction) { corr = c; }, onOrientation, store, get result() { return result; }, get frozen() { return frozen; }, get trackInfo() { return trackInfo; }, track: () => maybeTrack(true) };
+if (import.meta.env.DEV) (window as unknown as { __ar: unknown }).__ar = { get corr() { return corr; }, set corr(c: Correction) { corr = c; }, onOrientation, store, get result() { return result; }, get frozen() { return frozen; }, get trackInfo() { return trackInfo; }, track: () => maybeTrack(true), get keyframes() { return keyframes; }, get calibInfo() { return calibInfo; }, get autoInfo() { return autoInfo; }, get mode() { return mode; }, videoFov };
