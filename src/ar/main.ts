@@ -11,7 +11,19 @@ import { CALIB_MIN_SPREAD } from './calibrate';
 import { cancelCalibrate, runCalibrate } from './calibrateClient';
 import type { AutoAlignCandidate } from '../photo/autoAlign';
 import { attachGestures, fitCanvas } from '../ui/gestures';
-import { bandLine, drawLabels, layoutLabels, type LabelItem } from '../ui/labels';
+import { traceSilhouettes, type Silhouette } from '../skyline/silhouette';
+import {
+  FAMOUS,
+  drawPeakLabels,
+  famousRank,
+  higherPeakDistances,
+  isMajor,
+  labelPriority,
+  type Density,
+  type LabelCandidate,
+  type PeakInfo,
+  type ScreenLabel,
+} from './peakLabels';
 import { angDiff, cameraAngles, declinationJapan, holdAngle, magneticHeading } from '../sensor/orientation';
 import {
   alphaJump,
@@ -49,9 +61,38 @@ interface Store {
   autoFov: boolean;
   /** カメラ・ズームごとの画角の測定値（直近 5 回。中央値を使う） */
   fovHist: Record<string, number[]>;
+  /** いちばん奥の稜線の太さ [px]・濃さ・黒い縁 */
+  skyWidth: number;
+  skyAlpha: number;
+  skyHalo: boolean;
+  /** 手前の尾根の線（off = 出さない）と太さ */
+  nearLines: 'off' | Density;
+  nearWidth: number;
+  /** 山名の数 */
+  labelDensity: Density;
+  /** 山名に距離も出す */
+  showDist: boolean;
+  /** 信州百名山を優先して出す */
+  useShinshu: boolean;
 }
 const STORE_KEY = 'sanza.ar.v1';
-const store: Store = { f35: 26, fov: {}, bias: {}, autoTrack: true, autoStart: true, autoFov: true, fovHist: {} };
+const store: Store = {
+  f35: 26,
+  fov: {},
+  bias: {},
+  autoTrack: true,
+  autoStart: true,
+  autoFov: true,
+  fovHist: {},
+  skyWidth: 1.5,
+  skyAlpha: 0.9,
+  skyHalo: false,
+  nearLines: 'normal',
+  nearWidth: 2,
+  labelDensity: 'normal',
+  showDist: false,
+  useShinshu: true,
+};
 try {
   Object.assign(store, JSON.parse(localStorage.getItem(STORE_KEY) ?? '{}'));
 } catch {
@@ -189,8 +230,11 @@ const settings = loadSettings();
 const client = new SkylineClient();
 let gps: GeolocationPosition | null = null;
 let result: SkylineResult | null = null;
-let peaks = new Map<number, Peak>();
 let peakRes: PeakResult[] = [];
+/** 見えている山の山名の候補（稜線・山頂の計算が終わるたびに作り直す） */
+let candidates: (LabelCandidate & { az: number; elev: number })[] = [];
+/** 手前の尾根の線（量の設定ごとに作り直す） */
+let silhouettes: Silhouette[] = [];
 let computing = false;
 let status = '';
 
@@ -224,24 +268,77 @@ async function compute() {
     );
     result = res;
     peakRes = [];
+    candidates = [];
+    rebuildSilhouettes();
     status = '山名を取得中…';
     const pk = await peaksPromise;
     if (!pk.ok) {
       status = `山名を取得できません: ${pk.err.message}`;
       return;
     }
-    peaks = new Map(pk.got.map((p) => [p.id, p]));
+    const all = mergeFamous(pk.got, lat, lon);
     peakRes = await client.peaks(
-      pk.got.map(({ id, lat, lon, ele }) => ({ id, lat, lon, ele })),
+      all.map(({ id, lat, lon, ele }) => ({ id, lat, lon, ele: Number.isFinite(ele) ? ele : undefined })),
       settings.visibilityTolDeg,
       (p) => (status = `山の見え方を判定中… ${p.done}/${p.total}`),
     );
+    rebuildCandidates(all);
     status = '';
   } catch (e) {
     status = `計算に失敗しました: ${(e as Error).message}`;
   } finally {
     computing = false;
   }
+}
+
+/**
+ * OSM の山頂に有名な山の一覧の印と標高を付ける。照合できなかった有名な山（OSM に無い山）は一覧の座標で足す（id は負）。
+ * 標高は一覧の値 → OSM の ele の順に使う。
+ */
+function mergeFamous(osm: Peak[], lat: number, lon: number): PeakInfo[] {
+  const byOsm = new Map(FAMOUS.filter((f) => f.o !== undefined).map((f) => [f.o!, f]));
+  const out: PeakInfo[] = osm.map((p) => {
+    const f = byOsm.get(p.id);
+    // 山域の名前で載っている山（八ヶ岳など）は主峰の名前に添える：赤岳（八ヶ岳）
+    const name = f && p.name && !p.name.includes(f.n.replace(/\s*\(.*\)$/, '')) ? `${p.name}（${f.n}）` : (p.name ?? f?.n ?? '');
+    return { id: p.id, name, ele: f?.e ?? p.ele ?? NaN, lat: p.lat, lon: p.lon, lists: f?.l ?? 0 };
+  });
+  const ids = new Set(osm.map((p) => p.id));
+  FAMOUS.forEach((f, i) => {
+    if (f.o !== undefined && ids.has(f.o)) return;
+    if (inverse(lat, lon, f.la, f.lo).dist <= settings.maxDist) out.push({ id: -(i + 1), name: f.n, ele: f.e ?? NaN, lat: f.la, lon: f.lo, lists: f.l });
+  });
+  return out;
+}
+
+/** 見えている名前のある山から、山名の候補を作る（自分より高い山までの距離は名前の無い山も含めて測る） */
+function rebuildCandidates(all: PeakInfo[]) {
+  const res = new Map(peakRes.map((r) => [r.id, r]));
+  const withEle = all.map((p) => ({ id: p.id, lat: p.lat, lon: p.lon, ele: Number.isFinite(p.ele) ? p.ele : res.get(p.id)?.hDem ?? -Infinity }));
+  const higher = higherPeakDistances(withEle);
+  candidates = [];
+  for (const p of all) {
+    const r = res.get(p.id);
+    if (!r || r.status === PeakStatus.Hidden || !p.name) continue;
+    candidates.push({
+      ...p,
+      ele: Number.isFinite(p.ele) ? p.ele : r.hDem,
+      dist: r.dist,
+      higherDist: higher.get(p.id) ?? Infinity,
+      marginal: r.status === PeakStatus.Marginal,
+      az: r.az,
+      elev: r.elev,
+    });
+  }
+}
+
+const NEAR_OPTS = {
+  few: { minSpan: 2.5, minRatio: 1.6 },
+  normal: { minSpan: 1.0, minRatio: 1.3 },
+  many: { minSpan: 0.6, minRatio: 1.15 },
+} as const;
+function rebuildSilhouettes() {
+  silhouettes = result && store.nearLines !== 'off' ? traceSilhouettes(result, NEAR_OPTS[store.nearLines]) : [];
 }
 
 function movedFromResult(): number {
@@ -399,23 +496,16 @@ function draw() {
 
 function drawSkyline(cam: CameraParams, b: Basis) {
   const r = result!;
-  const nB = r.bands.length;
   const half = Math.atan(Math.hypot(cam.width, cam.height) / 2 / cam.focalPx) / RAD + 2;
   const step = r.azStep;
   const k0 = Math.floor((cam.yaw - half) / step);
   const k1 = Math.ceil((cam.yaw + half) / step);
   const maxJump = Math.max(cam.width, cam.height) * 0.5;
-  const strokeBand = (bi: number, mask: ((i: number) => boolean) | null, style: string, width: number, halo: boolean) => {
-    const arr = r.bandElev[bi];
-    ctx.beginPath();
+  /** 方位の番号 k の仰角 elevAt(k) を結んだ線の道筋を作る */
+  const path = (ka: number, kb: number, elevAt: (k: number) => number) => {
     let prev: [number, number] | null = null;
-    for (let k = k0; k <= k1; k++) {
-      const i = ((k % r.nAz) + r.nAz) % r.nAz;
-      if (mask && !mask(i)) {
-        prev = null;
-        continue;
-      }
-      const p = project(cam, b, dirFromAzEl(k * step, arr[i]));
+    for (let k = ka; k <= kb; k++) {
+      const p = project(cam, b, dirFromAzEl(k * step, elevAt(k)));
       if (!p) {
         prev = null;
         continue;
@@ -424,51 +514,64 @@ function drawSkyline(cam: CameraParams, b: Basis) {
       else ctx.moveTo(p[0], p[1]);
       prev = p;
     }
-    if (halo) {
-      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-      ctx.lineWidth = width + 2;
-      ctx.stroke();
-    }
-    ctx.strokeStyle = style;
-    ctx.lineWidth = width;
-    ctx.stroke();
   };
-  for (let bi = nB - 2; bi >= 0; bi--) {
-    const arr = r.bandElev[bi];
-    const next = r.bandElev[bi + 1];
-    strokeBand(bi, (i) => arr[i] < next[i] - 0.005, bandLine(bi, nB), 1, false);
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+
+  // 手前の尾根の線（画面に掛かる部分だけ）
+  if (silhouettes.length) {
+    ctx.beginPath();
+    for (const l of silhouettes) {
+      // 線の方位の範囲を、画面の方位の範囲 k0..k1 に合わせて（一周ずらして）重ねる
+      const n = l.elev.length;
+      const shift = Math.round((k0 - l.i0) / r.nAz) * r.nAz;
+      for (const s0 of [shift - r.nAz, shift, shift + r.nAz]) {
+        const a = Math.max(k0, l.i0 + s0);
+        const z = Math.min(k1, l.i0 + s0 + n - 1);
+        if (a <= z) path(a, z, (k) => l.elev[k - l.i0 - s0]);
+      }
+    }
+    ctx.strokeStyle = 'rgba(255,143,179,0.95)';
+    ctx.lineWidth = store.nearWidth;
+    ctx.stroke();
   }
-  strokeBand(nB - 1, null, '#ff2d55', 2, true);
+
+  // いちばん奥の稜線
+  const sky = r.bandElev[r.bandElev.length - 1];
+  ctx.beginPath();
+  path(k0, k1, (k) => sky[((k % r.nAz) + r.nAz) % r.nAz]);
+  ctx.globalAlpha = store.skyAlpha;
+  if (store.skyHalo) {
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+    ctx.lineWidth = store.skyWidth + 2;
+    ctx.stroke();
+  }
+  ctx.strokeStyle = '#ff2d55';
+  ctx.lineWidth = store.skyWidth;
+  ctx.stroke();
+  ctx.globalAlpha = 1;
 }
 
 function drawPeaks(cam: CameraParams, b: Basis, h: number) {
-  const items: LabelItem[] = [];
-  for (const res of peakRes) {
-    if (res.status === PeakStatus.Hidden) continue;
-    const peak = peaks.get(res.id);
-    if (!peak || (!peak.name && !settings.showUnnamedPeaks)) continue;
-    const p = project(cam, b, dirFromAzEl(res.az, res.elev));
+  const items: ScreenLabel[] = [];
+  for (const c of candidates) {
+    if (!isMajor(c, store.labelDensity, store.useShinshu)) continue;
+    const p = project(cam, b, dirFromAzEl(c.az, c.elev));
     if (!p || p[0] < 0 || p[0] > cam.width || p[1] < 0 || p[1] > cam.height) continue;
     items.push({
-      id: res.id,
+      id: c.id,
       x: p[0],
       y: p[1],
-      title: peak.name ?? '（無名）',
-      sub: `${Math.round(res.hUsed)}m ${(res.dist / 1000).toFixed(1)}km`,
-      priority: res.hUsed - res.dist / 200,
-      named: !!peak.name,
-      marginal: res.status === PeakStatus.Marginal,
+      title: c.name,
+      sub: `${Math.round(c.ele)}m` + (store.showDist ? ` ${(c.dist / 1000).toFixed(1)}km` : ''),
+      priority: labelPriority(c, store.useShinshu),
+      marginal: c.marginal,
+      famous: famousRank(c.lists, store.useShinshu) > 0,
     });
   }
-  const rowH = 30;
-  const top = Math.max(70, h * 0.1);
-  const maxRows = Math.max(1, Math.floor((h * 0.3) / rowH));
-  const placed = layoutLabels(ctx, items, maxRows, 'bold 13px system-ui, sans-serif', '10px system-ui, sans-serif');
-  drawLabels(ctx, items, placed, top, rowH, {
+  drawPeakLabels(ctx, items, cam.width, Math.max(70, h * 0.1), h - 130, {
     titleFont: 'bold 13px system-ui, sans-serif',
-    subFont: '10px system-ui, sans-serif',
-    color: '#fff',
-    halo: 'rgba(0,0,0,0.85)',
+    subFont: '11px system-ui, sans-serif',
   });
 }
 
@@ -993,6 +1096,55 @@ for (const [id, k, label] of toggles) {
   });
 }
 
+// 表示の設定
+type DisplayToggle = 'skyHalo' | 'showDist' | 'useShinshu';
+const displayToggles: [string, DisplayToggle, string][] = [
+  ['btn-halo', 'skyHalo', '稜線の黒い縁'],
+  ['btn-dist', 'showDist', '山名に距離も出す'],
+  ['btn-shinshu', 'useShinshu', '信州百名山を優先'],
+];
+for (const [id, k, label] of displayToggles) {
+  const render = () => {
+    $(id).setAttribute('aria-pressed', String(store[k]));
+    $(id).textContent = `${label}：${store[k] ? '入' : '切'}`;
+  };
+  render();
+  $(id).addEventListener('click', () => {
+    store[k] = !store[k];
+    saveStore();
+    render();
+  });
+}
+type DisplayRange = 'skyWidth' | 'skyAlpha' | 'nearWidth';
+const displayRanges: [string, string, DisplayRange, (v: number) => string][] = [
+  ['in-sky-w', 'out-sky-w', 'skyWidth', (v) => String(v)],
+  ['in-sky-a', 'out-sky-a', 'skyAlpha', (v) => String(Math.round(v * 100))],
+  ['in-near-w', 'out-near-w', 'nearWidth', (v) => String(v)],
+];
+for (const [inId, outId, k, show] of displayRanges) {
+  const el = $(inId) as HTMLInputElement;
+  el.value = String(store[k]);
+  $(outId).textContent = show(store[k]);
+  el.addEventListener('input', () => {
+    store[k] = Number(el.value);
+    $(outId).textContent = show(store[k]);
+    saveStore();
+  });
+}
+const selNear = $('sel-near') as HTMLSelectElement;
+selNear.value = store.nearLines;
+selNear.addEventListener('change', () => {
+  store.nearLines = selNear.value as Store['nearLines'];
+  saveStore();
+  rebuildSilhouettes();
+});
+const selLabels = $('sel-labels') as HTMLSelectElement;
+selLabels.value = store.labelDensity;
+selLabels.addEventListener('change', () => {
+  store.labelDensity = selLabels.value as Density;
+  saveStore();
+});
+
 /** 画角がずれる原因を調べるための表示（カメラの設定・ズームの方式） */
 function renderDiag() {
   const track = stream?.getVideoTracks()[0];
@@ -1100,4 +1252,4 @@ $('btn-start').addEventListener('click', async () => {
   requestAnimationFrame(loop);
 });
 
-if (import.meta.env.DEV) (window as unknown as { __ar: unknown }).__ar = { get corr() { return corr; }, set corr(c: Correction) { corr = c; }, onOrientation, store, get result() { return result; }, get frozen() { return frozen; }, get trackInfo() { return trackInfo; }, track: () => maybeTrack(true), get keyframes() { return keyframes; }, get calibInfo() { return calibInfo; }, get autoInfo() { return autoInfo; }, get mode() { return mode; }, videoFov };
+if (import.meta.env.DEV) (window as unknown as { __ar: unknown }).__ar = { get corr() { return corr; }, set corr(c: Correction) { corr = c; }, onOrientation, store, get result() { return result; }, get frozen() { return frozen; }, get trackInfo() { return trackInfo; }, track: () => maybeTrack(true), get keyframes() { return keyframes; }, get calibInfo() { return calibInfo; }, get autoInfo() { return autoInfo; }, get mode() { return mode; }, videoFov, get candidates() { return candidates; } };

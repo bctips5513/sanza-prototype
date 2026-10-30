@@ -11,7 +11,7 @@ export const PHOTO_DIR = join(__dirname, '../../test-photos');
 const CACHE = join(__dirname, '../../.cache');
 
 /** 地理院タイルをディスクにキャッシュする fetch */
-function cachedFetch(): typeof fetch {
+export function cachedFetch(): typeof fetch {
   return (async (input: RequestInfo | URL) => {
     const url = String(input);
     const file = join(CACHE, 'tiles', url.replace(/^https?:\/\//, '').replace(/[^\w.]/g, '_'));

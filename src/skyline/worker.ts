@@ -33,7 +33,7 @@ ctx.onmessage = async (ev: MessageEvent<WorkerRequest>) => {
         bytes: store.stats.bytes - before.bytes,
         missRefs: store.missRefs,
       };
-      const transfer = [...res.bandElev, ...res.bandDist, ...res.bandH].map((a) => a.buffer);
+      const transfer = [...res.bandElev, ...res.bandDist, ...res.bandH, res.edgeOff, res.edgeElev, res.edgeDist, res.edgeBehind].map((a) => a.buffer);
       ctx.postMessage({ type: 'result', id: msg.id, result: res, stats }, transfer);
     } else if (msg.type === 'peaks') {
       if (!lastEngine) throw new Error('先に稜線を計算してください');

@@ -126,6 +126,29 @@ body.ar {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  max-height: calc(100dvh - env(safe-area-inset-bottom) - 170px);
+  overflow-y: auto;
+}
+.ar-section {
+  margin-top: 4px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.25);
+}
+.ar-label input[type='range'] {
+  width: 8em;
+  vertical-align: middle;
+}
+.ar-label select {
+  flex: 0 0 auto;
+  width: 8em;
+  font-size: 15px;
+}
+.ar-label > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
 }
 .ar-more.hidden,
 .ar-fine.hidden,
@@ -134,6 +157,7 @@ body.ar {
 }
 .ar-label {
   display: flex;
+  white-space: nowrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;

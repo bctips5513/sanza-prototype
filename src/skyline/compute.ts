@@ -64,6 +64,17 @@ export interface SkylineResult {
   hGround: number;
   hObs: number;
   peaks: PeakResult[];
+  /**
+   * 手前の尾根の輪郭（方位ごと）。方位 i の輪郭は edgeOff[i]〜edgeOff[i+1]-1 番目。
+   * 輪郭 = そこより奥の地形が隠れていて、さらに奥で再び見えてくる点（いちばん奥の稜線は含まない）
+   */
+  edgeOff: Uint32Array;
+  /** 輪郭の仰角 [deg] */
+  edgeElev: Float32Array;
+  /** 輪郭までの距離 [m] */
+  edgeDist: Float32Array;
+  /** 輪郭のすぐ上に見えている奥の地形までの距離 [m] */
+  edgeBehind: Float32Array;
   samplesPerRay: number;
   elapsedMs: number;
 }
@@ -76,6 +87,12 @@ export interface Progress {
 
 const KNOT = 2000; // 測地線上の節点間隔 [m]（節点間はメルカトル座標で線形補間）
 const SECTOR_RAYS = 50;
+/** 輪郭として記録する最小の距離 [m]（足元の小さな起伏を除く） */
+const EDGE_MIN_DIST = 200;
+/** 奥の地形までの距離 ÷ 輪郭までの距離 がこれ未満なら、同じ斜面の小さな段差とみなして記録しない */
+const EDGE_MIN_RATIO = 1.05;
+/** 1方位あたりの輪郭の上限 */
+const EDGE_MAX = 64;
 const RAD = Math.PI / 180;
 
 export class SkylineEngine {
@@ -202,6 +219,7 @@ export class SkylineEngine {
     const bandElev = Array.from({ length: nB }, () => new Float32Array(nAz));
     const bandDist = Array.from({ length: nB }, () => new Float32Array(nAz));
     const bandH = Array.from({ length: nB }, () => new Float32Array(nAz));
+    const edges: number[][] = Array.from({ length: nAz }, () => []);
 
     // 山頂を方位・距離で前処理
     const pk = peaks
@@ -252,7 +270,7 @@ export class SkylineEngine {
       if (s + 1 < nSec) next = prepare(s + 1);
 
       for (const { i, knots } of cur.rays) {
-        this.castSkyline(knots, i, bandElev, bandDist, bandH);
+        this.castSkyline(knots, i, bandElev, bandDist, bandH, edges[i]);
       }
       for (const { item, knots } of cur.peaks) {
         peakResults.push(this.evalPeak(item.p, item.az, item.dist, item.tier, knots, tolDeg));
@@ -260,6 +278,19 @@ export class SkylineEngine {
       this.store.release(ids);
       onProgress?.({ phase: '稜線計算', done: s + 1, total: nSec });
     }
+
+    const edgeOff = new Uint32Array(nAz + 1);
+    for (let i = 0; i < nAz; i++) edgeOff[i + 1] = edgeOff[i] + edges[i].length / 3;
+    const nE = edgeOff[nAz];
+    const edgeElev = new Float32Array(nE);
+    const edgeDist = new Float32Array(nE);
+    const edgeBehind = new Float32Array(nE);
+    for (let i = 0; i < nAz; i++)
+      for (let j = 0, o = edgeOff[i]; j < edges[i].length; j += 3, o++) {
+        edgeElev[o] = edges[i][j];
+        edgeDist[o] = edges[i][j + 1];
+        edgeBehind[o] = edges[i][j + 2];
+      }
 
     return {
       lat,
@@ -273,6 +304,10 @@ export class SkylineEngine {
       hGround,
       hObs: this.hObs,
       peaks: peakResults,
+      edgeOff,
+      edgeElev,
+      edgeDist,
+      edgeBehind,
       samplesPerRay: this.dist.length,
       elapsedMs: performance.now() - t0,
     };
@@ -316,6 +351,7 @@ export class SkylineEngine {
     bandElev: Float32Array[],
     bandDist: Float32Array[],
     bandH: Float32Array[],
+    edges: number[],
   ) {
     const { dist, invD, drop, tierOf, bandOf, chains, store, hObs } = this;
     const n = dist.length;
@@ -324,6 +360,8 @@ export class SkylineEngine {
     let maxD = 0;
     let maxH = 0;
     let band = 0;
+    // 直前のサンプルが見えていたか（それまでの最大仰角を超えたか）
+    let prevVisible = false;
     for (let i = 0; i < n; i++) {
       const bi = bandOf[i];
       while (band < bi) {
@@ -342,10 +380,14 @@ export class SkylineEngine {
       const h = store.sample(chains[tierOf[i]], u, v);
       const tan = (h - hObs - drop[i]) * invD[i];
       if (tan > maxT) {
+        // 隠れていた区間の後で再び見えた → 最後に見えていた点が手前の尾根の輪郭
+        if (!prevVisible && maxT > -Infinity && maxD >= EDGE_MIN_DIST && d >= maxD * EDGE_MIN_RATIO && edges.length < EDGE_MAX * 3)
+          edges.push(Math.atan(maxT) / RAD, maxD, d);
         maxT = tan;
         maxD = d;
         maxH = h;
-      }
+        prevVisible = true;
+      } else prevVisible = false;
     }
     for (; band < nB; band++) {
       bandElev[band][ray] = Math.atan(maxT) / RAD;
