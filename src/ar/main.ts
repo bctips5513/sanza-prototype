@@ -46,6 +46,15 @@ const fmt = (v: number | null | undefined, d = 1) => (v === null || v === undefi
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const RAD = Math.PI / 180;
 
+/**
+ * 保存する仰角・傾きのくせの上限 [deg]（実測のくせは 1° 前後）。
+ * 間違った合わせの結果を保存すると次の合わせの出発点がずれ、ずれが積み重なるので、これを超える値は保存も採用もしない
+ */
+const BIAS_MAX = 3;
+/** 保存・採用する画角の、公称の画角からの許容幅（割合） */
+const FOV_TOL = 0.15;
+const biasOk = (b: { dPitch: number; dRoll: number }) => Math.abs(b.dPitch) <= BIAS_MAX && Math.abs(b.dRoll) <= BIAS_MAX;
+
 // ---------------------------------------------------------------- 保存する設定
 interface Store {
   /** 1× の35mm換算焦点距離 */
@@ -98,6 +107,8 @@ try {
 } catch {
   /* ignore */
 }
+// 以前の版で積み重なってしまった、ありえない大きさのくせは捨てる
+for (const [k, b] of Object.entries(store.bias)) if (!biasOk(b)) delete store.bias[k];
 function saveStore() {
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify(store));
@@ -197,8 +208,10 @@ function lock(label: string) {
   alignLabel = label;
   lockedDelta = compassOff !== null ? angDiff(corr.yawOff, compassOff) : 0;
   const hold = latest?.hold ?? 0;
-  store.bias[String(hold)] = { dPitch: corr.dPitch, dRoll: corr.dRoll };
-  saveStore();
+  if (biasOk(corr)) {
+    store.bias[String(hold)] = { dPitch: corr.dPitch, dRoll: corr.dRoll };
+    saveStore();
+  }
 }
 
 function unlock() {
@@ -408,9 +421,32 @@ function fovKey(): string {
   return `${cameraLabel()}|${hwZoom ? zoom : 1}`;
 }
 
-/** 映像（コマ）の長辺の画角 [deg] */
+/**
+ * 公称の長辺の画角 [deg]。
+ * iPhone の「トリプルカメラ」「デュアル広角カメラ」はズーム 1 が超広角（換算で 1× の半分の焦点距離）で、
+ * ズーム 2 で 1× のレンズに切り替わるので、カメラ側のズームの値を半分にして数える
+ */
+function nominalFov(): number {
+  const z = hwZoom ? zoom : 1;
+  const ultraBase = hwZoom && /トリプル|デュアル広角|Triple|Dual Wide/i.test(cameraLabel());
+  return hfovFrom35mm(store.f35 * (ultraBase ? z / 2 : z));
+}
+
+/** 公称の画角から FOV_TOL 以内か */
+function fovOk(fov: number): boolean {
+  return Number.isFinite(fov) && Math.abs(fov / nominalFov() - 1) <= FOV_TOL;
+}
+
+/** 映像（コマ）の長辺の画角 [deg]。保存した値が公称から外れていれば捨てる */
 function videoFov(): number {
-  return store.fov[fovKey()] ?? hfovFrom35mm(store.f35 * (hwZoom ? zoom : 1));
+  const k = fovKey();
+  const v = store.fov[k];
+  if (v !== undefined && !fovOk(v)) {
+    delete store.fov[k];
+    delete store.fovHist[k];
+    saveStore();
+  }
+  return store.fov[k] ?? nominalFov();
 }
 
 // ---------------------------------------------------------------- 止めた画面
@@ -616,7 +652,8 @@ function loop() {
 // ---------------------------------------------------------------- 手動合わせ
 /** 手で画角を変えたら、それまでの測定値は捨てて手の値から測り直す */
 function setManualFov(fov: number) {
-  store.fov[fovKey()] = fov;
+  const n = nominalFov();
+  store.fov[fovKey()] = Math.min(n * (1 + FOV_TOL), Math.max(n * (1 - FOV_TOL), fov));
   delete store.fovHist[fovKey()];
   calibInfo = '';
 }
@@ -684,8 +721,15 @@ function candPose(c: AutoAlignCandidate): Pose {
 /** 画角がまだ測れていなければ、自動合わせで振った焦点距離を仮の画角として使う（測定値には数えない） */
 function adoptCandFocal(c: AutoAlignCandidate, f: Frozen) {
   if (store.fovHist[fovKey()]?.length) return;
-  store.fov[fovKey()] = longFovFromFocal(c.focalPx, f.vw, f.vh);
+  const fov = longFovFromFocal(c.focalPx, f.vw, f.vh);
+  if (!fovOk(fov)) return;
+  store.fov[fovKey()] = fov;
   saveStore();
+}
+
+/** 自動合わせの答えが、センサーのくせ・公称の画角から見てありうるか（電線などに合ってしまった答えを捨てる） */
+function candPlausible(c: AutoAlignCandidate, f: Frozen): boolean {
+  return biasOk(correctionFrom(candPose(c), f.sensor)) && fovOk(longFovFromFocal(c.focalPx, f.vw, f.vh));
 }
 
 function applyCandidate(c: AutoAlignCandidate, f: Frozen, label: string) {
@@ -735,13 +779,14 @@ $('btn-auto').addEventListener('click', async () => {
     // 探索範囲の外まで山登りで動いた答えも採用しない
     const ok =
       best &&
+      candPlausible(best, f) &&
       Math.abs(angDiff(best.yaw, prior.yaw)) <= yawRange + 0.5 &&
       (res.confidence === 'high' || (res.confidence === 'medium' && Math.abs(best.pitch - prior.pitch) <= 2));
     if (best && ok) {
       applyCandidate(best, f, `自動・信頼度${conf}`);
       addKeyframe(f);
       toast(`合わせました（信頼度 ${conf}）。ずれていれば指で直して「ライブに戻る」`, 2500);
-    } else showCands(res.candidates.slice(0, 3), f);
+    } else showCands(res.candidates.filter((c) => candPlausible(c, f)).slice(0, 3), f);
   } catch (e) {
     toast(`自動合わせに失敗: ${(e as Error).message}`);
   } finally {
@@ -838,7 +883,7 @@ function maybeAutoStart() {
       const best = res.best;
       // 自動で使うのは「高」で、センサーの仰角から 1.5° 以内、コンパスから 15° 以内の答えだけ
       // （実写真から作った狭い画角の映像で、偽の「高」の多くは仰角が 2〜3° ずれるか、コンパスから大きく離れていた）
-      if (!best || res.confidence !== 'high' || Math.abs(angDiff(best.yaw, prior.yaw)) > 15 || Math.abs(best.pitch - prior.pitch) > 1.5) {
+      if (!best || res.confidence !== 'high' || !candPlausible(best, f) || Math.abs(angDiff(best.yaw, prior.yaw)) > 15 || Math.abs(best.pitch - prior.pitch) > 1.5) {
         autoInfo = '自動合わせ：稜線を探しています（見つからなければ「自動合わせ」か指で）';
         return;
       }
@@ -1022,6 +1067,10 @@ function maybeCalibrate() {
         return;
       }
       const measured = longFovFromFocal(r.focalPx, k0.width, k0.height);
+      if (!fovOk(measured) || !biasOk(r.corr)) {
+        calibInfo = `画角の測定：ありえない値のため見送り（${fmt(measured)}°）`;
+        return;
+      }
       const hist = (store.fovHist[fk] ??= []);
       hist.push(measured);
       if (hist.length > 5) hist.shift();
@@ -1151,7 +1200,7 @@ function renderDiag() {
   const st = (track?.getSettings?.() ?? {}) as MediaTrackSettings & { zoom?: number };
   const caps = (track?.getCapabilities?.() ?? {}) as MediaTrackCapabilities & { zoom?: { min: number; max: number } };
   const hist = store.fovHist[fovKey()] ?? [];
-  const nominal = hfovFrom35mm(store.f35 * (hwZoom ? zoom : 1));
+  const nominal = nominalFov();
   $('diag').innerHTML = [
     `カメラ：${esc(cameraLabel())}　映像 ${video.videoWidth}×${video.videoHeight}`,
     `ズーム：${zoom}× ${hwZoom ? `カメラ側（設定値 ${st.zoom ?? '?'}、範囲 ${caps.zoom ? `${caps.zoom.min}〜${caps.zoom.max}` : '?'}）` : '画面の拡大'}`,
@@ -1164,6 +1213,19 @@ $('btn-reset').addEventListener('click', () => {
   trackInfo = '';
   $('more').classList.add('hidden');
   toast('コンパスの向きに戻しました');
+});
+$('btn-reset-all').addEventListener('click', () => {
+  store.bias = {};
+  store.fov = {};
+  store.fovHist = {};
+  saveStore();
+  resetKeyframes();
+  calibInfo = '';
+  unlock();
+  trackInfo = '';
+  renderDiag();
+  $('more').classList.add('hidden');
+  toast('保存した補正（くせ・画角）をすべて消し、コンパスの向きに戻しました');
 });
 $('btn-compute').addEventListener('click', () => {
   $('more').classList.add('hidden');
